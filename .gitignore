@@ -1,0 +1,16 @@
+#
+# Normal rules
+#
+*.d
+*.o
+*.map
+*.exe
+*~
+
+#
+# Generated files
+#
+/.cproject
+/.project
+/.settings
+/openrockcli
