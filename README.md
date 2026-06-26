@@ -110,6 +110,9 @@ CROSS=x86_64-w64-mingw32- make -f Makefile.win
 
 For 32-bits windows, you can using `i686-w64-mingw32-` instead of `x86_64-w64-mingw32` above.
 
+The release workflow builds the Windows package in the MSYS2 POSIX environment
+and includes the required runtime DLLs in the zip package.
+
 ## OpenixCLI-Compatible Usage
 
 Show the OpenixCLI-style command surface:

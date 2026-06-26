@@ -65,14 +65,14 @@ jobs:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: MSYS
           update: true
           install: >-
             base-devel
+            gcc
             make
             pkgconf
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-libusb
+            libusb-devel
 
       - name: Build
         run: |
@@ -88,7 +88,7 @@ jobs:
           mkdir -p "dist/${name}"
           cp openrockcli.exe README.md LICENSE "dist/${name}/"
           ldd openrockcli.exe |
-            awk '/mingw64/ { print $3 }' |
+            awk '/msys64/ { print $3 }' |
             sort -u |
             while read -r dll; do
               [ -n "${dll}" ] && cp "${dll}" "dist/${name}/"
