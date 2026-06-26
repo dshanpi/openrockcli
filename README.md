@@ -59,6 +59,13 @@ before compiling, for example in Ubuntu:
 sudo apt install libusb-1.0-0-dev
 ```
 
+For Ubuntu users, release builds also provide an `amd64` `.deb` package:
+
+```shell
+sudo apt install ./openrockcli_*_amd64.deb
+openrockcli --version
+```
+
 Then just type `make` at the root directory, you will see a binary program.
 
 ```shell
@@ -595,8 +602,9 @@ git push origin v1.2.0
 The workflow uploads:
 
 - `openrockcli-linux-x86_64.tar.gz`
+- `openrockcli_<version>_amd64.deb`
 - `openrockcli-windows-x86_64.zip`
-- SHA256 files for both packages
+- SHA256 files for release packages
 
 ## License
 
