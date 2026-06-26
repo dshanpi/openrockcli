@@ -1,8 +1,12 @@
 #include <rock.h>
 #include <rockchip_backend.h>
+#ifdef _WIN32
+#include <conio.h>
+#else
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <termios.h>
+#endif
 
 static const char * manufacturer[] = {
 	"Samsung",
@@ -649,6 +653,7 @@ static void tui_draw(const struct tui_state_t * state)
 	fflush(stdout);
 }
 
+#ifndef _WIN32
 static int tui_read_key(void)
 {
 	unsigned char ch;
@@ -932,6 +937,35 @@ static int tui(void)
 		tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
 	return rc;
 }
+#else
+static int tui(void)
+{
+	char line[512];
+	int choice = 0;
+
+	printf("openrockcli interactive flasher\r\n");
+	printf("1. Scan devices\r\n");
+	printf("2. Flash update.img firmware (not available in Windows build)\r\n");
+	printf("3. List Rockusb devices with upgrade_tool (not available in Windows build)\r\n");
+	printf("4. Quit\r\n");
+	printf("> ");
+	fflush(stdout);
+	if(!fgets(line, sizeof(line), stdin))
+		return 0;
+	choice = strtol(line, NULL, 0);
+	if(choice == 1)
+	{
+		rockchip_backend_scan(0, 0);
+		return 0;
+	}
+	if(choice == 2 || choice == 3)
+	{
+		printf("Error: this Windows build does not run Rockchip upgrade_tool workflows.\r\n");
+		return 1;
+	}
+	return 0;
+}
+#endif
 
 static void usage(void)
 {

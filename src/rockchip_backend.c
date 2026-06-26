@@ -1,8 +1,12 @@
 #include <rockchip_backend.h>
+#ifndef _WIN32
 #include <dirent.h>
+#endif
 #include <stdarg.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
 
 const char * rockchip_backend_upgrade_tool(void)
 {
@@ -24,6 +28,7 @@ const char * rockchip_backend_upgrade_tool(void)
 	return candidates[ARRAY_SIZE(candidates) - 1];
 }
 
+#ifndef _WIN32
 static int rockchip_backend_run_tool(char * const args[])
 {
 	pid_t pid;
@@ -400,6 +405,7 @@ static void rockchip_backend_report(rockchip_backend_event_cb cb, void * user, c
 	else
 		printf("%s\r\n", msg);
 }
+#endif
 
 int rockchip_backend_scan_devices(struct rockchip_device_info * devices, int max_devices)
 {
@@ -479,6 +485,7 @@ int rockchip_backend_scan(int detailed, int verbose)
 	return found;
 }
 
+#ifndef _WIN32
 int rockchip_backend_list_devices(void)
 {
 	const char * tool = rockchip_backend_upgrade_tool();
@@ -1192,3 +1199,58 @@ int rockchip_backend_flash(const struct rockchip_flash_request * request)
 	memset(&state, 0, sizeof(state));
 	return rockchip_backend_flash_with_cb(request, rockchip_backend_cli_event, &state);
 }
+#else
+static void rockchip_backend_windows_unsupported(const char * command)
+{
+	printf("Error: '%s' is not available in the Windows build because it requires Rockchip upgrade_tool.\r\n",
+		command);
+	printf("Use the Linux build or Rockchip's Windows flashing tool for update.img workflows.\r\n");
+}
+
+int rockchip_backend_list_devices(void)
+{
+	rockchip_backend_windows_unsupported("devices");
+	return 0;
+}
+
+int rockchip_backend_read_firmware_info(const char * firmware, struct rockchip_firmware_info * info)
+{
+	(void)firmware;
+	if(info)
+		memset(info, 0, sizeof(*info));
+	rockchip_backend_windows_unsupported("inspect");
+	return 0;
+}
+
+int rockchip_backend_inspect_firmware(const char * firmware)
+{
+	(void)firmware;
+	rockchip_backend_windows_unsupported("inspect");
+	return 0;
+}
+
+int rockchip_backend_unpack_firmware(const char * firmware, const char * outdir)
+{
+	(void)firmware;
+	(void)outdir;
+	rockchip_backend_windows_unsupported("unpack");
+	return 0;
+}
+
+int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request,
+	rockchip_backend_event_cb cb, void * user)
+{
+	(void)request;
+	(void)cb;
+	(void)user;
+	rockchip_backend_windows_unsupported("flash");
+	return 0;
+}
+
+int rockchip_backend_flash(const struct rockchip_flash_request * request)
+{
+	(void)request;
+	rockchip_backend_windows_unsupported("flash");
+	return 0;
+}
+#endif
