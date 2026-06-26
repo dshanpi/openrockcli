@@ -527,6 +527,26 @@ openrockcli extra maskrom-dump-arm32 --rc4 off --uart 0xff0a0000 0xff910000 1024
 * [The rockchip loader binaries](https://github.com/rockchip-linux/rkbin)
 * [The rockchip rkdeveloptool](https://github.com/rockchip-linux/rkdeveloptool)
 
+## CI Release
+
+GitHub Actions builds Linux and Windows x86_64 binaries on push, pull request, and manual dispatch.
+
+To publish a release:
+
+1. Add a repository secret named `CI_GITHUB` with release permission.
+2. Push a version tag:
+
+```shell
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The workflow uploads:
+
+- `openrockcli-linux-x86_64.tar.gz`
+- `openrockcli-windows-x86_64.zip`
+- SHA256 files for both packages
+
 ## License
 
 This library is free software; you can redistribute it and or modify it under the terms of the MIT license. See [MIT License](LICENSE) for details.
