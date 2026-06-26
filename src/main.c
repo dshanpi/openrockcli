@@ -141,10 +141,13 @@ struct tui_state_t {
 
 static void tui_get_size(int * width, int * height)
 {
+#ifndef _WIN32
 	struct winsize ws;
+#endif
 
 	*width = 100;
 	*height = 30;
+#ifndef _WIN32
 	if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0)
 	{
 		if(ws.ws_col > 0)
@@ -152,6 +155,7 @@ static void tui_get_size(int * width, int * height)
 		if(ws.ws_row > 0)
 			*height = ws.ws_row;
 	}
+#endif
 }
 
 static void tui_repeat(char ch, int count)

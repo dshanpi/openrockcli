@@ -139,8 +139,10 @@ int openrockcli_init(struct openrockcli_ctx_t * ctx)
 
 		if(ctx->hdl && ctx->chip && found)
 		{
+#ifndef _WIN32
 			if(libusb_kernel_driver_active(ctx->hdl, 0))
 				libusb_detach_kernel_driver(ctx->hdl, 0);
+#endif
 
 			if(libusb_claim_interface(ctx->hdl, 0) == 0)
 			{

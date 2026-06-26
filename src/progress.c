@@ -1,10 +1,17 @@
 #include <progress.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 static double gettime(void)
 {
+#ifdef _WIN32
+	return GetTickCount() / 1000.0;
+#else
 	struct timeval tv;
 	gettimeofday(&tv, NULL);
 	return tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+#endif
 }
 
 static const char * format_eta(double remaining)
