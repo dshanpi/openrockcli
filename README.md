@@ -14,6 +14,40 @@ OpenixCLI-compatible workflow for scanning devices and flashing Rockchip
 - Firmware info and extraction helpers
 - Original low-level maskrom, storage, flash, OTP, and vendor storage commands
 
+## Architecture
+
+```mermaid
+flowchart LR
+    user[User / CI / Script] --> cli[openrockcli CLI]
+    cli --> parser[Command parser and TUI]
+    parser --> backend[Rockchip firmware backend]
+    parser --> lowlevel[Low-level Rockusb commands]
+    backend --> upgrade[Rockchip upgrade_tool]
+    backend --> image[update.img inspector / unpacker]
+    lowlevel --> libusb[libusb-1.0]
+    upgrade --> device[Rockchip device in Loader or Maskrom]
+    libusb --> device
+```
+
+The OpenixCLI-style commands (`scan`, `flash`, `devices`, `inspect`, `unpack`,
+and `tui`) live in the CLI layer. Firmware package flashing is delegated to the
+Rockchip `upgrade_tool` when that is the safest path. The original low-level
+Rockusb commands continue to use libusb directly.
+
+## Source Layout
+
+```text
+openrockcli/
+├── .github/workflows/      GitHub Actions build and release workflow
+├── include/                Public and internal C headers
+├── payloads/               Maskrom helper payload sources
+├── src/                    C implementation files
+├── 99-openrockcli.rules    Linux udev rules
+├── Makefile                Native Linux build
+├── Makefile.win            MinGW Windows build
+└── README.md
+```
+
 ## How to build
 
 ### Linux platform
@@ -530,6 +564,18 @@ openrockcli extra maskrom-dump-arm32 --rc4 off --uart 0xff0a0000 0xff910000 1024
 ## CI Release
 
 GitHub Actions builds Linux and Windows x86_64 binaries on push, pull request, and manual dispatch.
+
+```mermaid
+flowchart LR
+    push[Push / Pull Request] --> build[Build jobs]
+    build --> linux[Linux x86_64 tar.gz]
+    build --> windows[Windows x86_64 zip]
+    linux --> artifacts[Workflow artifacts]
+    windows --> artifacts
+    tag[v* tag] --> release[GitHub Release]
+    artifacts --> release
+    secret[CI_GITHUB secret] --> release
+```
 
 To publish a release:
 

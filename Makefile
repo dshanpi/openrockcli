@@ -25,8 +25,8 @@ MCFLAGS		:=
 LIBDIRS		:=
 LIBS 		:= `pkg-config --libs libusb-1.0`
 
-INCDIRS		:= -I . `pkg-config --cflags libusb-1.0`
-SRCDIRS		:= .
+INCDIRS		:= -I include -I src `pkg-config --cflags libusb-1.0`
+SRCDIRS		:= src
 
 SFILES		:= $(foreach dir, $(SRCDIRS), $(wildcard $(dir)/*.S))
 CFILES		:= $(foreach dir, $(SRCDIRS), $(wildcard $(dir)/*.c))
@@ -72,4 +72,4 @@ install:
 	install -Dm0644 LICENSE /usr/share/licenses/openrockcli/LICENSE
 
 clean:
-	@$(RM) $(DEPS) $(OBJS) $(NAME).exe $(NAME) *~
+	@$(RM) $(DEPS) $(OBJS) $(NAME).exe $(NAME) *~ src/*~
