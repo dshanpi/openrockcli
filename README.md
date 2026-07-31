@@ -10,7 +10,10 @@ OpenixCLI-compatible workflow for scanning devices and flashing Rockchip
 - Device scanning with USB bus/port, mode, VID/PID, and chip name
 - OpenixCLI-compatible commands: `scan`, `flash`, `tui`
 - Rockchip firmware helper commands: `devices`, `inspect`, `unpack`
-- Rockchip `update.img` flashing through the SDK bundled `upgrade_tool`
+- Native Rockchip `update.img` inspection, extraction, and flashing
+- Embedded MiniLoader download from Maskrom and automatic Loader reconnection
+- Streaming partition writes with optional read-back verification
+- Native primary/backup GPT generation from packaged Rockchip parameters
 - Firmware info and extraction helpers
 - Original low-level maskrom, storage, flash, OTP, and vendor storage commands
 
@@ -22,17 +25,17 @@ flowchart LR
     cli --> parser[Command parser and TUI]
     parser --> backend[Rockchip firmware backend]
     parser --> lowlevel[Low-level Rockusb commands]
-    backend --> upgrade[Rockchip upgrade_tool]
-    backend --> image[update.img inspector / unpacker]
+    backend --> image[Native RKFW / RKAF parser]
+    image --> stream[Partition stream writer]
     lowlevel --> libusb[libusb-1.0]
-    upgrade --> device[Rockchip device in Loader or Maskrom]
+    stream --> device[Rockchip device in Loader or Maskrom]
     libusb --> device
 ```
 
 The OpenixCLI-style commands (`scan`, `flash`, `devices`, `inspect`, `unpack`,
-and `tui`) live in the CLI layer. Firmware package flashing is delegated to the
-Rockchip `upgrade_tool` when that is the safest path. The original low-level
-Rockusb commands continue to use libusb directly.
+and `tui`) live in the CLI layer. Firmware parsing and flashing are implemented
+inside OpenRockCLI and use libusb directly; no external Rockchip flasher is
+required.
 
 ## Source Layout
 
@@ -74,19 +77,6 @@ make
 sudo make install
 ```
 
-The `flash`, `devices`, `inspect`, and `unpack` commands use the
-Rockchip `upgrade_tool`. By default openrockcli searches the SDK bundled tool at:
-
-```shell
-tools/linux/Linux_Upgrade_Tool/Linux_Upgrade_Tool/upgrade_tool
-```
-
-You can override it:
-
-```shell
-OPENROCKCLI_UPGRADE_TOOL=/path/to/upgrade_tool openrockcli devices
-```
-
 ### Window platform
 
 Install some build tools
@@ -117,10 +107,9 @@ CROSS=x86_64-w64-mingw32- make -f Makefile.win
 
 For 32-bits windows, you can using `i686-w64-mingw32-` instead of `x86_64-w64-mingw32` above.
 
-The release workflow builds the Windows package with MSYS2 UCRT64 and includes
-the required runtime DLLs in the zip package. The Windows build supports USB
-scanning and low-level libusb commands. `update.img` workflows that shell out to
-Rockchip `upgrade_tool` are available in the Linux build.
+The release workflow builds the Windows package with MSYS2 UCRT64. Windows,
+Linux, and macOS use the same native RKFW/RKAF and Rockusb implementation for
+`update.img` workflows.
 
 ## OpenixCLI-Compatible Usage
 
@@ -146,7 +135,7 @@ Scan for Rockchip USB devices:
 openrockcli scan
 ```
 
-List devices through Rockchip `upgrade_tool`:
+List Rockusb devices:
 
 ```shell
 openrockcli devices
@@ -195,19 +184,19 @@ openrockcli flash update.img --mode partition --partitions rootfs,oem,userdata
 
 Notes:
 
-- Rockchip `update.img` flashing is delegated to `upgrade_tool UF`.
-- `--mode partition` extracts `update.img` with `upgrade_tool EXF` and flashes
-  selected entries. Known `upgrade_tool DI` partitions use `DI`; other package
-  entries such as `rootfs`, `oem`, and `userdata` are written by parsing
-  `parameter.txt` and calling `upgrade_tool WL`.
-- Current partition flashing supports `boot`, `uboot`, `misc`, `recovery`,
-  `kernel`, `system`, `trust`, `resource`, `rootfs`, `oem`, and `userdata`.
-- Bus/port, non-partition modes, and verify options are accepted for an
-  OpenixCLI-compatible command surface; `upgrade_tool` ultimately controls how
-  Rockchip update packages are applied.
-- `poweroff` and `shutdown` map to Rockchip `upgrade_tool UF -noreset`,
-  because `upgrade_tool` does not expose a real power-off action for
-  `update.img` flashing.
+- OpenRockCLI parses the outer RKFW header and embedded RKAF package table
+  directly. Partition locations come from the package table, so no SDK tool or
+  shell process is involved.
+- GPT firmware parameters are converted to primary and backup GPT tables;
+  SPI NAND IDB copies are written before GPT so the partition table is not
+  erased while preparing the boot reserve.
+- In Maskrom mode, the packaged MiniLoader is downloaded and OpenRockCLI waits
+  for the same physical USB port to reconnect in Loader mode.
+- `--verify true` reads each written block back and compares it byte-for-byte.
+- `--mode partition` writes only the comma-separated RKAF entries selected by
+  `--partitions`; it does not extract the package to a temporary directory.
+- `poweroff` and `shutdown` leave the target in Loader mode because Rockusb has
+  no portable power-off command. `reboot` issues the native Rockusb reset.
 - For raw sector operations, use the original low-level `openrockcli flash read`,
   `openrockcli flash write`, and `openrockcli flash erase` commands below.
 
@@ -225,10 +214,10 @@ usage:
     openrockcli                              - Launch interactive TUI
     openrockcli tui                          - Launch interactive TUI
     openrockcli scan                         - List connected Rockchip USB devices
-    openrockcli devices                      - List Rockusb devices with upgrade_tool
+    openrockcli devices                      - List Rockusb devices
     openrockcli inspect <firmware.img>       - Inspect Rockchip firmware package
     openrockcli unpack <firmware.img> <dir>  - Unpack Rockchip firmware package
-    openrockcli flash <firmware.img> [opts]  - Flash Rockchip update.img via upgrade_tool
+    openrockcli flash <firmware.img> [opts]  - Flash Rockchip update.img natively
     openrockcli maskrom <ddr> <usbplug> [--rc4-off]    - Initial chip using ddr and usbplug in maskrom mode
     openrockcli download <loader>                      - Initial chip using loader in maskrom mode
     openrockcli upgrade <loader>                       - Upgrade loader to flash in loader mode
@@ -586,12 +575,12 @@ flowchart LR
     windows --> artifacts
     tag[v* tag] --> release[GitHub Release]
     artifacts --> release
-    secret[CI_GITHUB secret] --> release
+    permissions[Repository GITHUB_TOKEN] --> release
 ```
 
 To publish a release:
 
-1. Add a repository secret named `CI_GITHUB` with release permission.
+1. Ensure GitHub Actions has `contents: write` permission for releases.
 2. Push a version tag:
 
 ```shell

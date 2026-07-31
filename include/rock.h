@@ -71,6 +71,7 @@ struct flash_info_t {
 const char * openrockcli_chip_name(uint16_t pid);
 int openrockcli_scan(libusb_context * context);
 int openrockcli_init(struct openrockcli_ctx_t * ctx);
+int openrockcli_init_selected(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port);
 void rock_maskrom_upload_memory(struct openrockcli_ctx_t * ctx, uint32_t code, void * buf, uint64_t len, int rc4);
 void rock_maskrom_upload_file(struct openrockcli_ctx_t * ctx, uint32_t code, const char * filename, int rc4);
 void rock_maskrom_dump_arm32(struct openrockcli_ctx_t * ctx, uint32_t uart, uint32_t addr, uint32_t len, int rc4);

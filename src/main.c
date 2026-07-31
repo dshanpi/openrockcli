@@ -424,7 +424,7 @@ static void tui_draw_help(int width, int height)
 		" V            Toggle verify",
 		" A            Cycle post action / Select all parts",
 		" Space        Toggle partition selection",
-		" D            Show upgrade_tool devices",
+		" D            Show Rockusb devices",
 		" H            Toggle this help",
 		" Ctrl+C       Abort / Quit",
 		"",
@@ -730,7 +730,7 @@ static int tui(void)
 		printf("openrockcli interactive flasher\r\n");
 		printf("1. Scan devices\r\n");
 		printf("2. Flash update.img firmware\r\n");
-		printf("3. List Rockusb devices with upgrade_tool\r\n");
+		printf("3. List Rockusb devices\r\n");
 		printf("4. Quit\r\n");
 		printf("> ");
 		fflush(stdout);
@@ -814,7 +814,7 @@ static int tui(void)
 			if(raw_enabled)
 				tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
 			tui_read_key();
-			tui_log(&state, "INFO", "upgrade_tool device listing finished.");
+			tui_log(&state, "INFO", "Rockusb device listing finished.");
 			tui_draw(&state);
 		}
 		else if(key == 'f' || key == 'F' || key == 'b' || key == 'B')
@@ -949,8 +949,8 @@ static int tui(void)
 
 	printf("openrockcli interactive flasher\r\n");
 	printf("1. Scan devices\r\n");
-	printf("2. Flash update.img firmware (not available in Windows build)\r\n");
-	printf("3. List Rockusb devices with upgrade_tool (not available in Windows build)\r\n");
+	printf("2. Flash update.img firmware\r\n");
+	printf("3. List Rockusb devices\r\n");
 	printf("4. Quit\r\n");
 	printf("> ");
 	fflush(stdout);
@@ -962,11 +962,23 @@ static int tui(void)
 		rockchip_backend_scan(0, 0);
 		return 0;
 	}
-	if(choice == 2 || choice == 3)
+	if(choice == 2)
 	{
-		printf("Error: this Windows build does not run Rockchip upgrade_tool workflows.\r\n");
-		return 1;
+		struct rockchip_flash_request request;
+		printf("Firmware path: ");
+		fflush(stdout);
+		if(!fgets(line, sizeof(line), stdin))
+			return 0;
+		line[strcspn(line, "\r\n")] = 0;
+		memset(&request, 0, sizeof(request));
+		request.firmware = line;
+		request.mode = "full_erase";
+		request.post_action = "reboot";
+		request.verify = 1;
+		return rockchip_backend_flash(&request) ? 0 : 1;
 	}
+	if(choice == 3)
+		return rockchip_backend_list_devices() ? 0 : 1;
 	return 0;
 }
 #endif
@@ -983,7 +995,7 @@ static void usage(void)
 	printf("  inspect  Inspect firmware contents (image header and package table)\r\n");
 	printf("  unpack   Unpack firmware data to disk\r\n");
 	printf("  tui      Launch interactive TUI mode\r\n");
-	printf("  devices  List Rockusb devices with upgrade_tool\r\n");
+	printf("  devices  List Rockusb devices\r\n");
 	printf("  help     Print this message or the help of the given subcommand(s)\r\n");
 	printf("\r\n");
 	printf("Options:\r\n");
@@ -1077,7 +1089,7 @@ static void command_help(const char * command)
 	}
 	if(!strcmp(command, "devices"))
 	{
-		printf("List Rockusb devices with upgrade_tool\r\n\r\n");
+		printf("List Rockusb devices\r\n\r\n");
 		printf("Usage: openrockcli devices\r\n");
 		return;
 	}

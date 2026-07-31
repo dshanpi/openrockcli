@@ -1,72 +1,23 @@
 #include <rockchip_backend.h>
-#ifndef _WIN32
-#include <dirent.h>
-#endif
+#include <rkimage.h>
+#include <rkgpt.h>
 #include <stdarg.h>
 #include <sys/stat.h>
-#ifndef _WIN32
-#include <sys/wait.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#include <windows.h>
+#define rk_fseek _fseeki64
+#define rk_mkdir(path) _mkdir(path)
+#else
+#define rk_fseek fseeko
+#define rk_mkdir(path) mkdir(path, 0755)
 #endif
 
-const char * rockchip_backend_upgrade_tool(void)
-{
-	const char * env = getenv("OPENROCKCLI_UPGRADE_TOOL");
-	const char * candidates[] = {
-		"tools/linux/Linux_Upgrade_Tool/Linux_Upgrade_Tool/upgrade_tool",
-		"../linux/Linux_Upgrade_Tool/Linux_Upgrade_Tool/upgrade_tool",
-		"../../tools/linux/Linux_Upgrade_Tool/Linux_Upgrade_Tool/upgrade_tool",
-		"upgrade_tool",
-	};
-
-	if(env && access(env, X_OK) == 0)
-		return env;
-	for(int i = 0; i < ARRAY_SIZE(candidates); i++)
-	{
-		if(access(candidates[i], X_OK) == 0)
-			return candidates[i];
-	}
-	return candidates[ARRAY_SIZE(candidates) - 1];
-}
-
-#ifndef _WIN32
-static int rockchip_backend_run_tool(char * const args[])
-{
-	pid_t pid;
-	int status;
-
-	fflush(stdout);
-	pid = fork();
-	if(pid < 0)
-	{
-		printf("Error: failed to start %s: %s\r\n", args[0], strerror(errno));
-		return 0;
-	}
-	if(pid == 0)
-	{
-		execv(args[0], args);
-		execvp(args[0], args);
-		fprintf(stderr, "Error: failed to exec %s: %s\r\n", args[0], strerror(errno));
-		_exit(127);
-	}
-	if(waitpid(pid, &status, 0) < 0)
-	{
-		printf("Error: failed to wait for %s: %s\r\n", args[0], strerror(errno));
-		return 0;
-	}
-	if(WIFEXITED(status) && WEXITSTATUS(status) == 0)
-		return 1;
-	if(WIFEXITED(status))
-		printf("Error: %s exited with %d\r\n", args[0], WEXITSTATUS(status));
-	else
-		printf("Error: %s terminated unexpectedly\r\n", args[0]);
-	return 0;
-}
-
-static void rockchip_backend_emit(rockchip_backend_event_cb cb, void * user,
+static void backend_emit(rockchip_backend_event_cb cb, void * user,
 	enum rockchip_backend_event_type type, const char * text, int percent)
 {
 	struct rockchip_backend_event event;
-
 	if(!cb)
 		return;
 	memset(&event, 0, sizeof(event));
@@ -76,336 +27,78 @@ static void rockchip_backend_emit(rockchip_backend_event_cb cb, void * user,
 	cb(&event, user);
 }
 
-static const char * rockchip_backend_stage_name(const char * line)
+static void backend_report(rockchip_backend_event_cb cb, void * user, const char * fmt, ...)
 {
-	if(!line)
-		return NULL;
-	if(strstr(line, "Download Boot") || strstr(line, "Download IDB"))
-		return "Writing Boot";
-	if(strstr(line, "Download Firmware") || strstr(line, "Download Image"))
-		return "Flashing Partitions";
-	if(strstr(line, "Erase Flash") || strstr(line, "Erase System") ||
-		strstr(line, "Erase Userdata") || strstr(line, "Erase IDB"))
-		return "Erasing";
-	if(strstr(line, "Check Image") || strstr(line, "Check Chip") ||
-		strstr(line, "Test Device") || strstr(line, "Get FlashInfo") ||
-		strstr(line, "Get Block State"))
-		return "Query Device";
-	if(strstr(line, "Wait For Loader") || strstr(line, "Wait For Maskrom") ||
-		strstr(line, "Wait For MSC"))
-		return "Reconnecting";
-	if(strstr(line, "Reset Device") || strstr(line, "Reset Pipe"))
-		return "Setting Mode";
-	if(strstr(line, "Lowerformat") || strstr(line, "Tag Bad Block") ||
-		strstr(line, "Test Block"))
-		return "Erasing";
-	if(strstr(line, "Prepare IDB"))
-		return "Writing Boot";
-	return NULL;
-}
-
-static int rockchip_backend_line_percent(const char * line, int * percent)
-{
-	const char * pct;
-
-	if(!line || !percent)
-		return 0;
-	pct = strchr(line, '(');
-	if(pct && sscanf(pct, "(%d%%)", percent) == 1)
-		return 1;
-	if(sscanf(line, "%*[^0123456789]%d%%", percent) == 1 && strchr(line, '%'))
-		return 1;
-	return 0;
-}
-
-static void rockchip_backend_parse_tool_line(const char * line,
-	rockchip_backend_event_cb cb, void * user)
-{
-	const char * stage;
-	int percent;
-
-	if(!line || !line[0])
-		return;
-	stage = rockchip_backend_stage_name(line);
-	if(strstr(line, " Start"))
-	{
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, stage ? stage : line, -1);
-		return;
-	}
-	if(strstr(line, " Success"))
-	{
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, stage ? stage : line, 100);
-		return;
-	}
-	if(strstr(line, " Fail") || strstr(line, "Error:") || strstr(line, "No found"))
-	{
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, line, -1);
-		return;
-	}
-	if(rockchip_backend_line_percent(line, &percent))
-	{
-		if(stage)
-			rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, stage, percent);
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_PROGRESS, stage ? stage : line, percent);
-		return;
-	}
-	rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, line, -1);
-}
-
-static int rockchip_backend_run_tool_capture(char * const args[],
-	rockchip_backend_event_cb cb, void * user)
-{
-	int pipefd[2];
-	pid_t pid;
-	int status;
-	char buf[512];
-	char line[1024];
-	size_t line_len = 0;
-	ssize_t nread;
-	int skip_ansi = 0;
-
-	if(pipe(pipefd) != 0)
-	{
-		char msg[160];
-		snprintf(msg, sizeof(msg), "Error: failed to create pipe: %s", strerror(errno));
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
-		return 0;
-	}
-
-	fflush(stdout);
-	pid = fork();
-	if(pid < 0)
-	{
-		char msg[160];
-		close(pipefd[0]);
-		close(pipefd[1]);
-		snprintf(msg, sizeof(msg), "Error: failed to start %s: %s", args[0], strerror(errno));
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
-		return 0;
-	}
-	if(pid == 0)
-	{
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execv(args[0], args);
-		execvp(args[0], args);
-		fprintf(stderr, "Error: failed to exec %s: %s\r\n", args[0], strerror(errno));
-		_exit(127);
-	}
-	close(pipefd[1]);
-	while((nread = read(pipefd[0], buf, sizeof(buf))) > 0)
-	{
-		for(ssize_t i = 0; i < nread; i++)
-		{
-			char ch = buf[i];
-			if(skip_ansi)
-			{
-				if((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))
-					skip_ansi = 0;
-				continue;
-			}
-			if(ch == '\033')
-			{
-				skip_ansi = 1;
-				continue;
-			}
-			if(ch == '\r' || ch == '\n')
-			{
-				if(line_len)
-				{
-					line[line_len] = 0;
-					rockchip_backend_parse_tool_line(line, cb, user);
-					line_len = 0;
-				}
-				continue;
-			}
-			if(line_len + 1 < sizeof(line))
-				line[line_len++] = ch;
-		}
-	}
-	if(line_len)
-	{
-		line[line_len] = 0;
-		rockchip_backend_parse_tool_line(line, cb, user);
-	}
-	close(pipefd[0]);
-
-	if(waitpid(pid, &status, 0) < 0)
-	{
-		char msg[160];
-		snprintf(msg, sizeof(msg), "Error: failed to wait for %s: %s", args[0], strerror(errno));
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
-		return 0;
-	}
-	if(WIFEXITED(status) && WEXITSTATUS(status) == 0)
-		return 1;
-	if(WIFEXITED(status))
-	{
-		char msg[160];
-		snprintf(msg, sizeof(msg), "Error: %s exited with %d", args[0], WEXITSTATUS(status));
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
-	}
-	else
-	{
-		char msg[160];
-		snprintf(msg, sizeof(msg), "Error: %s terminated unexpectedly", args[0]);
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
-	}
-	return 0;
-}
-
-static int rockchip_backend_run_tool_buffer(char * const args[], char * out, size_t out_size)
-{
-	int pipefd[2];
-	pid_t pid;
-	int status;
-	size_t used = 0;
-	ssize_t nread;
-
-	if(out && out_size)
-		out[0] = 0;
-	if(pipe(pipefd) != 0)
-	{
-		printf("Error: failed to create pipe: %s\r\n", strerror(errno));
-		return 0;
-	}
-	fflush(stdout);
-	pid = fork();
-	if(pid < 0)
-	{
-		close(pipefd[0]);
-		close(pipefd[1]);
-		printf("Error: failed to start %s: %s\r\n", args[0], strerror(errno));
-		return 0;
-	}
-	if(pid == 0)
-	{
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		close(pipefd[1]);
-		execv(args[0], args);
-		execvp(args[0], args);
-		fprintf(stderr, "Error: failed to exec %s: %s\r\n", args[0], strerror(errno));
-		_exit(127);
-	}
-	close(pipefd[1]);
-	while(out && used + 1 < out_size &&
-		(nread = read(pipefd[0], out + used, out_size - used - 1)) > 0)
-	{
-		used += nread;
-		out[used] = 0;
-	}
-	while(read(pipefd[0], &(char){0}, 1) > 0)
-		;
-	close(pipefd[0]);
-	if(waitpid(pid, &status, 0) < 0)
-	{
-		printf("Error: failed to wait for %s: %s\r\n", args[0], strerror(errno));
-		return 0;
-	}
-	if(WIFEXITED(status) && WEXITSTATUS(status) == 0)
-		return 1;
-	if(WIFEXITED(status))
-		printf("Error: %s exited with %d\r\n", args[0], WEXITSTATUS(status));
-	else
-		printf("Error: %s terminated unexpectedly\r\n", args[0]);
-	return 0;
-}
-
-static char * rockchip_backend_size(char * buf, size_t buflen, uint64_t size)
-{
-	const char * unit[] = {"B", "KB", "MB", "GB", "TB"};
-	int idx = 0;
-	double value = size;
-
-	while(value >= 1024.0 && idx < (int)ARRAY_SIZE(unit) - 1)
-	{
-		value /= 1024.0;
-		idx++;
-	}
-	if(idx == 0)
-		snprintf(buf, buflen, "%.0f %s", value, unit[idx]);
-	else
-		snprintf(buf, buflen, "%.2f %s", value, unit[idx]);
-	return buf;
-}
-
-static void rockchip_backend_report(rockchip_backend_event_cb cb, void * user, const char * fmt, ...);
-
-static int rockchip_backend_firmware_stat(const char * firmware, struct stat * st)
-{
-	if(!firmware || !firmware[0])
-	{
-		printf("Error: firmware file not specified\r\n");
-		return 0;
-	}
-	if(stat(firmware, st) != 0 || !S_ISREG(st->st_mode))
-	{
-		printf("Error: firmware file not found: %s (%s)\r\n", firmware, strerror(errno));
-		return 0;
-	}
-	if(access(firmware, R_OK) != 0)
-	{
-		printf("Error: unable to read firmware '%s': %s\r\n", firmware, strerror(errno));
-		return 0;
-	}
-	return 1;
-}
-
-static int rockchip_backend_firmware_stat_cb(const char * firmware, struct stat * st,
-	rockchip_backend_event_cb cb, void * user)
-{
-	if(!firmware || !firmware[0])
-	{
-		rockchip_backend_report(cb, user, "Error: firmware file not specified");
-		return 0;
-	}
-	if(stat(firmware, st) != 0 || !S_ISREG(st->st_mode))
-	{
-		rockchip_backend_report(cb, user, "Error: firmware file not found: %s (%s)", firmware, strerror(errno));
-		return 0;
-	}
-	if(access(firmware, R_OK) != 0)
-	{
-		rockchip_backend_report(cb, user, "Error: unable to read firmware '%s': %s", firmware, strerror(errno));
-		return 0;
-	}
-	return 1;
-}
-
-static int rockchip_backend_valid_flash_mode(const char * mode)
-{
-	if(!mode)
-		return 1;
-	return !strcmp(mode, "partition") || !strcmp(mode, "keep_data") ||
-		!strcmp(mode, "partition_erase") || !strcmp(mode, "full_erase");
-}
-
-static int rockchip_backend_valid_post_action(const char * post_action)
-{
-	if(!post_action)
-		return 1;
-	return !strcmp(post_action, "reboot") || !strcmp(post_action, "poweroff") ||
-		!strcmp(post_action, "shutdown");
-}
-
-static void rockchip_backend_report(rockchip_backend_event_cb cb, void * user, const char * fmt, ...)
-{
-	char msg[256];
+	char message[256];
 	va_list ap;
-
 	va_start(ap, fmt);
-	vsnprintf(msg, sizeof(msg), fmt, ap);
+	vsnprintf(message, sizeof(message), fmt, ap);
 	va_end(ap);
 	if(cb)
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
+		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, message, -1);
 	else
-		printf("%s\r\n", msg);
+		printf("%s\r\n", message);
 }
+
+static void backend_sleep_ms(unsigned int milliseconds)
+{
+#ifdef _WIN32
+	Sleep(milliseconds);
+#else
+	usleep(milliseconds * 1000U);
 #endif
+}
+
+static void backend_close_device(struct openrockcli_ctx_t * ctx)
+{
+	if(!ctx)
+		return;
+	if(ctx->hdl)
+	{
+		libusb_release_interface(ctx->hdl, 0);
+		libusb_close(ctx->hdl);
+		ctx->hdl = NULL;
+	}
+}
+
+static int backend_port_string(libusb_device * device, char * out, size_t out_size)
+{
+	uint8_t ports[8] = { 0 };
+	int count = libusb_get_port_numbers(device, ports, sizeof(ports));
+	int pos = 0;
+	if(!out || !out_size)
+		return 0;
+	out[0] = 0;
+	for(int i = 0; i < count && pos < (int)out_size - 1; i++)
+		pos += snprintf(out + pos, out_size - pos, "%s%u", i ? "." : "", ports[i]);
+	if(count <= 0)
+		snprintf(out, out_size, "-");
+	return count;
+}
+
+static int backend_is_adb(libusb_device * device)
+{
+	struct libusb_config_descriptor * config = NULL;
+	int adb = 0;
+	if(libusb_get_active_config_descriptor(device, &config) != 0)
+		return 0;
+	for(int i = 0; i < config->bNumInterfaces && !adb; i++)
+	{
+		const struct libusb_interface * iface = &config->interface[i];
+		for(int j = 0; j < iface->num_altsetting; j++)
+		{
+			const struct libusb_interface_descriptor * desc = &iface->altsetting[j];
+			if(desc->bInterfaceClass == 0xff && desc->bInterfaceSubClass == 0x42 &&
+				desc->bInterfaceProtocol == 0x01)
+			{
+				adb = 1;
+				break;
+			}
+		}
+	}
+	libusb_free_config_descriptor(config);
+	return adb;
+}
 
 int rockchip_backend_scan_devices(struct rockchip_device_info * devices, int max_devices)
 {
@@ -413,8 +106,7 @@ int rockchip_backend_scan_devices(struct rockchip_device_info * devices, int max
 	libusb_device ** list = NULL;
 	ssize_t count;
 	int found = 0;
-
-	if(libusb_init(&context) != 0)
+	if(!devices || max_devices <= 0 || libusb_init(&context) != 0)
 		return 0;
 	count = libusb_get_device_list(context, &list);
 	if(count < 0)
@@ -425,35 +117,33 @@ int rockchip_backend_scan_devices(struct rockchip_device_info * devices, int max
 	for(ssize_t i = 0; i < count && found < max_devices; i++)
 	{
 		struct libusb_device_descriptor desc;
-		libusb_device * device = list[i];
 		struct rockchip_device_info * out;
-		uint8_t ports[8] = { 0 };
-		int nports;
-		int pos = 0;
-
-		if(libusb_get_device_descriptor(device, &desc) != 0)
+		if(libusb_get_device_descriptor(list[i], &desc) != 0 || desc.idVendor != 0x2207 ||
+			backend_is_adb(list[i]))
 			continue;
-		if(desc.idVendor != 0x2207)
-			continue;
-
 		out = &devices[found++];
 		memset(out, 0, sizeof(*out));
-		out->bus = libusb_get_bus_number(device);
+		out->bus = libusb_get_bus_number(list[i]);
 		out->vid = desc.idVendor;
 		out->pid = desc.idProduct;
+		backend_port_string(list[i], out->port, sizeof(out->port));
 		snprintf(out->mode, sizeof(out->mode), "%s",
-			((desc.bcdUSB & 0x0001) == 0x0000) ? "maskrom" : "loader");
-		snprintf(out->chip, sizeof(out->chip), "%s", openrockcli_chip_name(desc.idProduct));
-
-		nports = libusb_get_port_numbers(device, ports, sizeof(ports));
-		if(nports > 0)
+			(desc.bcdUSB & 1) ? "loader" : "maskrom");
+		if(!strcmp(out->mode, "maskrom") && desc.iProduct)
 		{
-			for(int p = 0; p < nports && pos < (int)sizeof(out->port) - 1; p++)
-				pos += snprintf(out->port + pos, sizeof(out->port) - pos, "%s%u",
-					p ? "." : "", ports[p]);
+			libusb_device_handle * handle = NULL;
+			unsigned char product[128] = { 0 };
+			if(libusb_open(list[i], &handle) == 0)
+			{
+				if(libusb_get_string_descriptor_ascii(handle, desc.iProduct, product,
+					sizeof(product) - 1) > 0 &&
+					(strstr((char *)product, "USB-MSC") || strstr((char *)product, "Loader") ||
+					 strstr((char *)product, "download")))
+					snprintf(out->mode, sizeof(out->mode), "loader");
+				libusb_close(handle);
+			}
 		}
-		else
-			snprintf(out->port, sizeof(out->port), "-");
+		snprintf(out->chip, sizeof(out->chip), "%s", openrockcli_chip_name(desc.idProduct));
 	}
 	libusb_free_device_list(list, 1);
 	libusb_exit(context);
@@ -463,334 +153,165 @@ int rockchip_backend_scan_devices(struct rockchip_device_info * devices, int max
 int rockchip_backend_scan(int detailed, int verbose)
 {
 	struct rockchip_device_info devices[32];
-	int found;
-
+	int count;
 	(void)detailed;
 	(void)verbose;
 	printf("Scanning USB devices...\r\n\r\n");
-	found = rockchip_backend_scan_devices(devices, ARRAY_SIZE(devices));
-	if(!found)
+	count = rockchip_backend_scan_devices(devices, ARRAY_SIZE(devices));
+	if(!count)
 	{
 		printf("Error: Device not found\r\n");
 		return 0;
 	}
 	printf("Bus  Port  VID:PID    Mode      Chip\r\n");
 	printf("---  ----  ---------  --------  --------\r\n");
-	for(int i = 0; i < found; i++)
-	{
-		printf("%03u  %-4.4s  %04x:%04x  %-8s  %s\r\n",
-			devices[i].bus, devices[i].port, devices[i].vid, devices[i].pid,
-			devices[i].mode, devices[i].chip);
-	}
-	return found;
+	for(int i = 0; i < count; i++)
+		printf("%03u  %-4.4s  %04x:%04x  %-8s  %s\r\n", devices[i].bus,
+			devices[i].port, devices[i].vid, devices[i].pid, devices[i].mode, devices[i].chip);
+	return count;
 }
 
-#ifndef _WIN32
 int rockchip_backend_list_devices(void)
 {
-	const char * tool = rockchip_backend_upgrade_tool();
-	char * const args[] = { (char *)tool, "LD", NULL };
-
-	return rockchip_backend_run_tool(args);
+	return rockchip_backend_scan(1, 0);
 }
 
-static void rockchip_backend_trim(char * s)
+static void backend_chip_tag(char * out, size_t out_size, uint32_t tag)
 {
-	char * end;
-
-	if(!s)
-		return;
-	while(isspace((unsigned char)*s))
-		memmove(s, s + 1, strlen(s));
-	end = s + strlen(s);
-	while(end > s && isspace((unsigned char)end[-1]))
-		*--end = 0;
-}
-
-static int rockchip_backend_hex_u64(const char * s, uint64_t * value)
-{
-	char * end = NULL;
-	unsigned long long v;
-
-	if(!s || !value)
-		return 0;
-	v = strtoull(s, &end, 0);
-	if(end == s)
-		return 0;
-	*value = v;
-	return 1;
-}
-
-static void rockchip_backend_parse_entry_field(struct rockchip_firmware_entry * entry, char * field)
-{
-	char * eq;
-	char * key;
-	char * value;
-
-	if(!entry || !field)
-		return;
-	rockchip_backend_trim(field);
-	eq = strchr(field, '=');
-	if(!eq)
-		return;
-	*eq = 0;
-	key = field;
-	value = eq + 1;
-	rockchip_backend_trim(key);
-	rockchip_backend_trim(value);
-	if(!strcmp(key, "EntryNo"))
-		entry->entry_no = strtol(value, NULL, 0);
-	else if(!strcmp(key, "file"))
-		snprintf(entry->file, sizeof(entry->file), "%s", value);
-	else if(!strcmp(key, "partition"))
-		snprintf(entry->partition, sizeof(entry->partition), "%s", value);
-	else if(!strcmp(key, "type"))
-		snprintf(entry->type, sizeof(entry->type), "%s", value);
-	else if(!strcmp(key, "offset"))
-		rockchip_backend_hex_u64(value, &entry->offset);
-	else if(!strcmp(key, "size"))
-		rockchip_backend_hex_u64(value, &entry->size);
-}
-
-static void rockchip_backend_parse_entry_line(struct rockchip_firmware_info * info, char * line)
-{
-	struct rockchip_firmware_entry * entry;
-	char * save = NULL;
-	char * field;
-
-	if(!info || info->entry_count >= ROCKCHIP_BACKEND_MAX_FW_ENTRIES)
-		return;
-	entry = &info->entries[info->entry_count];
-	memset(entry, 0, sizeof(*entry));
-	entry->entry_no = -1;
-	for(field = strtok_r(line, ";", &save); field; field = strtok_r(NULL, ";", &save))
-		rockchip_backend_parse_entry_field(entry, field);
-	if(entry->entry_no >= 0 || entry->file[0])
-		info->entry_count++;
-}
-
-static void rockchip_backend_parse_sfi_output(struct rockchip_firmware_info * info, char * output)
-{
-	char * save = NULL;
-	char * line;
-
-	for(line = strtok_r(output, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save))
-	{
-		rockchip_backend_trim(line);
-		if(!strncmp(line, "Type:", 5))
-		{
-			snprintf(info->image_type, sizeof(info->image_type), "%s", line + 5);
-			rockchip_backend_trim(info->image_type);
-		}
-		else if(!strncmp(line, "Chip Tag:", 9))
-		{
-			char tmp[256];
-			char * version;
-			char * build;
-
-			snprintf(tmp, sizeof(tmp), "%s", line + 9);
-			version = strstr(tmp, "Version:");
-			if(version)
-			{
-				char version_tmp[128];
-				*version = 0;
-				version += strlen("Version:");
-				snprintf(version_tmp, sizeof(version_tmp), "%s", version);
-				build = strstr(version_tmp, "Build Time:");
-				if(build)
-				{
-					*build = 0;
-					build += strlen("Build Time:");
-					snprintf(info->build_time, sizeof(info->build_time), "%s", build);
-					if((build = strstr(info->build_time, "Sign:")))
-						*build = 0;
-					rockchip_backend_trim(info->build_time);
-				}
-				snprintf(info->version, sizeof(info->version), "%.31s", version_tmp);
-				rockchip_backend_trim(info->version);
-			}
-			snprintf(info->chip_tag, sizeof(info->chip_tag), "%.15s", tmp);
-			rockchip_backend_trim(info->chip_tag);
-		}
-		else if(!strncmp(line, "EntryNo=", 8))
-			rockchip_backend_parse_entry_line(info, line);
-	}
+	char bytes[5];
+	memcpy(bytes, &tag, 4);
+	bytes[4] = 0;
+	if(isprint((unsigned char)bytes[0]) && isprint((unsigned char)bytes[1]) &&
+		isprint((unsigned char)bytes[2]) && isprint((unsigned char)bytes[3]))
+		snprintf(out, out_size, "%c%c%c%c", bytes[3], bytes[2], bytes[1], bytes[0]);
+	else
+		snprintf(out, out_size, "%08x", tag);
 }
 
 int rockchip_backend_read_firmware_info(const char * firmware, struct rockchip_firmware_info * info)
 {
-	const char * tool = rockchip_backend_upgrade_tool();
-	char * const args[] = { (char *)tool, "SFI", (char *)firmware, NULL };
-	struct stat st;
-	char * output;
-	int ok;
-
+	struct rkimage image;
+	char error[192] = { 0 };
 	if(!info)
 		return 0;
 	memset(info, 0, sizeof(*info));
-	if(!rockchip_backend_firmware_stat(firmware, &st))
-		return 0;
-	snprintf(info->path, sizeof(info->path), "%s", firmware);
-	info->file_size = st.st_size;
-	output = malloc(128 * 1024);
-	if(!output)
+	if(!rkimage_open(firmware, &image, error, sizeof(error)))
 	{
-		printf("Error: failed to allocate firmware info buffer\r\n");
+		printf("Error: %s\r\n", error[0] ? error : "invalid firmware");
 		return 0;
 	}
-	ok = rockchip_backend_run_tool_buffer(args, output, 128 * 1024);
-	if(ok)
-		rockchip_backend_parse_sfi_output(info, output);
-	free(output);
-	return ok;
+	snprintf(info->path, sizeof(info->path), "%s", firmware);
+	snprintf(info->image_type, sizeof(info->image_type), "Update Firmware");
+	backend_chip_tag(info->chip_tag, sizeof(info->chip_tag), image.chip_tag);
+	snprintf(info->version, sizeof(info->version), "%u.%u.%02u",
+		(image.version >> 24) & 0xff, (image.version >> 16) & 0xff, image.version & 0xffff);
+	snprintf(info->build_time, sizeof(info->build_time), "%04u-%02u-%02u %02u:%02u:%02u",
+		image.year, image.month, image.day, image.hour, image.minute, image.second);
+	info->file_size = image.file_size;
+	info->entry_count = image.item_count;
+	for(int i = 0; i < image.item_count; i++)
+	{
+		const struct rkimage_item * source = &image.items[i];
+		struct rockchip_firmware_entry * entry = &info->entries[i];
+		entry->entry_no = i;
+		snprintf(entry->file, sizeof(entry->file), "%s", source->file);
+		snprintf(entry->partition, sizeof(entry->partition), "%s", source->name);
+		snprintf(entry->type, sizeof(entry->type), "%s", source->flash_offset == UINT32_MAX ? "boot" : "image");
+		entry->offset = source->data_offset;
+		entry->size = source->size;
+		entry->flash_offset = source->flash_offset;
+		entry->flash_sectors = source->flash_sectors;
+	}
+	return 1;
+}
+
+static void backend_size(char * out, size_t out_size, uint64_t bytes)
+{
+	const char * units[] = { "B", "KiB", "MiB", "GiB" };
+	double value = (double)bytes;
+	int unit = 0;
+	while(value >= 1024.0 && unit < 3)
+	{
+		value /= 1024.0;
+		unit++;
+	}
+	snprintf(out, out_size, unit ? "%.1f %s" : "%.0f %s", value, units[unit]);
 }
 
 int rockchip_backend_inspect_firmware(const char * firmware)
 {
 	struct rockchip_firmware_info info;
 	char size[32];
-
 	if(!rockchip_backend_read_firmware_info(firmware, &info))
 		return 0;
-	printf("Inspecting firmware...\r\n");
-	printf("Firmware: %s\r\n", info.path);
-	printf("Size: %s\r\n", rockchip_backend_size(size, sizeof(size), info.file_size));
-	if(info.image_type[0])
-		printf("Type: %s\r\n", info.image_type);
-	if(info.chip_tag[0])
-		printf("Chip Tag: %s\r\n", info.chip_tag);
-	if(info.version[0])
-		printf("Version: %s\r\n", info.version);
-	if(info.build_time[0])
-		printf("Build Time: %s\r\n", info.build_time);
-	printf("Entry Count: %d\r\n", info.entry_count);
+	backend_size(size, sizeof(size), info.file_size);
+	printf("Inspecting firmware...\r\nFirmware: %s\r\nSize: %s\r\nType: %s\r\n",
+		info.path, size, info.image_type);
+	printf("Chip Tag: %s\r\nVersion: %s\r\nBuild Time: %s\r\nEntry Count: %d\r\n",
+		info.chip_tag, info.version, info.build_time, info.entry_count);
 	for(int i = 0; i < info.entry_count; i++)
 	{
 		const struct rockchip_firmware_entry * e = &info.entries[i];
-		printf("  [%02d] %-24s partition=%-12s type=%-10s offset=0x%llx size=0x%llx\r\n",
-			e->entry_no,
-			e->file[0] ? e->file : "-",
-			e->partition[0] ? e->partition : "-",
-			e->type[0] ? e->type : "-",
-			(unsigned long long)e->offset,
-			(unsigned long long)e->size);
+		printf("  [%02d] %-24s partition=%-12s type=%-6s offset=0x%llx size=0x%llx",
+			e->entry_no, e->file, e->partition, e->type,
+			(unsigned long long)e->offset, (unsigned long long)e->size);
+		if(e->flash_offset != UINT32_MAX)
+			printf(" lba=0x%llx sectors=0x%llx", (unsigned long long)e->flash_offset,
+				(unsigned long long)e->flash_sectors);
+		printf("\r\n");
 	}
 	return 1;
 }
 
+static int backend_safe_filename(const char * file)
+{
+	return file && file[0] && !strstr(file, "..") && !strchr(file, '/') && !strchr(file, '\\');
+}
+
 int rockchip_backend_unpack_firmware(const char * firmware, const char * outdir)
 {
-	const char * tool = rockchip_backend_upgrade_tool();
-	char * const args[] = { (char *)tool, "EXF", (char *)firmware, (char *)outdir, NULL };
+	struct rkimage image;
+	char error[192] = { 0 };
 	struct stat st;
-	char size[32];
-
-	if(!rockchip_backend_firmware_stat(firmware, &st))
-		return 0;
-	if(!outdir || !outdir[0])
+	if(!outdir || !outdir[0] || !rkimage_open(firmware, &image, error, sizeof(error)))
 	{
-		printf("Error: output directory not specified\r\n");
+		printf("Error: %s\r\n", error[0] ? error : "output directory not specified");
 		return 0;
 	}
-	printf("Unpacking firmware...\r\n");
-	printf("Firmware: %s\r\n", firmware);
-	printf("Size: %s\r\n", rockchip_backend_size(size, sizeof(size), st.st_size));
-	printf("Output: %s\r\n\r\n", outdir);
-	return rockchip_backend_run_tool(args);
-}
-
-struct rockchip_backend_cli_state {
-	char stage[96];
-};
-
-static void rockchip_backend_cli_event(const struct rockchip_backend_event * event, void * user)
-{
-	struct rockchip_backend_cli_state * state = user;
-
-	if(!event)
-		return;
-	if(event->type == ROCKCHIP_BACKEND_EVENT_PROGRESS)
+	if(stat(outdir, &st) != 0 && rk_mkdir(outdir) != 0)
 	{
-		int percent = event->percent;
-		int filled;
-
-		if(percent < 0)
-			percent = 0;
-		if(percent > 100)
-			percent = 100;
-		filled = percent * 40 / 100;
-		printf("\rFlashing: [");
-		for(int i = 0; i < filled; i++)
-			putchar('#');
-		for(int i = filled; i < 40; i++)
-			putchar('-');
-		printf("] %3d%%", percent);
-		fflush(stdout);
-		if(percent >= 100)
-			printf("\r\n");
-		return;
+		printf("Error: cannot create output directory '%s': %s\r\n", outdir, strerror(errno));
+		return 0;
 	}
-	if(event->type == ROCKCHIP_BACKEND_EVENT_STAGE)
+	for(int i = 0; i < image.item_count; i++)
 	{
-		if(state && event->text && !strcmp(state->stage, event->text))
-			return;
-		if(state && event->text)
-			snprintf(state->stage, sizeof(state->stage), "%s", event->text);
-		printf("Stage: %s\r\n", event->text);
-		return;
+		char path[1024];
+		if(!backend_safe_filename(image.items[i].file))
+		{
+			printf("Error: unsafe filename in firmware: %s\r\n", image.items[i].file);
+			return 0;
+		}
+		snprintf(path, sizeof(path), "%s/%s", outdir, image.items[i].file);
+		printf("Extracting %s\r\n", image.items[i].file);
+		if(!rkimage_extract(&image, &image.items[i], path))
+			return 0;
 	}
-	if(event->text)
-		printf("%s\r\n", event->text);
+	return 1;
 }
 
-static const char * rockchip_backend_partition_flag(const char * partition)
-{
-	if(!partition)
-		return NULL;
-	if(!strcmp(partition, "parameter"))
-		return "-p";
-	if(!strcmp(partition, "boot"))
-		return "-b";
-	if(!strcmp(partition, "kernel"))
-		return "-k";
-	if(!strcmp(partition, "system"))
-		return "-s";
-	if(!strcmp(partition, "recovery"))
-		return "-r";
-	if(!strcmp(partition, "misc"))
-		return "-m";
-	if(!strcmp(partition, "uboot"))
-		return "-u";
-	if(!strcmp(partition, "trust"))
-		return "-t";
-	if(!strcmp(partition, "resource"))
-		return "-re";
-	return NULL;
-}
-
-struct rockchip_backend_partition_layout {
-	char name[ROCKCHIP_BACKEND_MAX_NAME];
-	uint64_t start;
-	uint64_t sectors;
-	int grow;
-};
-
-static int rockchip_backend_partition_selected(const char * csv, const char * partition)
+static int backend_selected(const char * csv, const char * name)
 {
 	const char * p = csv;
-	size_t len;
-
+	size_t length;
 	if(!csv || !csv[0])
 		return 1;
-	if(!partition || !partition[0])
-		return 0;
-	len = strlen(partition);
+	length = strlen(name);
 	while(*p)
 	{
 		while(*p == ',' || isspace((unsigned char)*p))
 			p++;
-		if(!strncmp(p, partition, len) &&
-			(p[len] == 0 || p[len] == ',' || isspace((unsigned char)p[len])))
+		if(!strncmp(p, name, length) &&
+			(p[length] == 0 || p[length] == ',' || isspace((unsigned char)p[length])))
 			return 1;
 		p = strchr(p, ',');
 		if(!p)
@@ -799,458 +320,508 @@ static int rockchip_backend_partition_selected(const char * csv, const char * pa
 	return 0;
 }
 
-static int rockchip_backend_parse_partition_layout(const char * parameter,
-	struct rockchip_backend_partition_layout * layouts, int max_layouts)
+static int backend_open_device(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port)
 {
-	FILE * fp;
-	char data[16384];
-	size_t n;
-	char * p;
-	int count = 0;
-
-	fp = fopen(parameter, "rb");
-	if(!fp)
+	memset(ctx, 0, sizeof(*ctx));
+	if(libusb_init(&ctx->context) != 0)
 		return 0;
-	n = fread(data, 1, sizeof(data) - 1, fp);
-	fclose(fp);
-	data[n] = 0;
-	p = strstr(data, "mtdparts=");
-	if(!p)
-		return 0;
-	p += strlen("mtdparts=");
-	if(*p == ':')
-		p++;
-	while(*p && *p != '\r' && *p != '\n' && !isspace((unsigned char)*p) && count < max_layouts)
+	if(!openrockcli_init_selected(ctx, bus, port))
 	{
-		struct rockchip_backend_partition_layout * layout = &layouts[count];
-		uint64_t sectors = 0;
-		uint64_t start = 0;
-		int grow = 0;
-		char * end;
-		char * name;
-		char * name_end;
-		size_t name_len;
-
-		while(*p == ',')
-			p++;
-		if(!*p || *p == '\r' || *p == '\n')
-			break;
-		if(*p == '-')
-		{
-			grow = 1;
-			p++;
-		}
-		else
-		{
-			sectors = strtoull(p, &end, 0);
-			if(end == p)
-				break;
-			p = end;
-		}
-		if(*p != '@')
-			break;
-		p++;
-		start = strtoull(p, &end, 0);
-		if(end == p || *end != '(')
-			break;
-		p = end + 1;
-		name = p;
-		name_end = strpbrk(name, ":)");
-		if(!name_end)
-			break;
-		name_len = name_end - name;
-		if(name_len >= sizeof(layout->name))
-			name_len = sizeof(layout->name) - 1;
-		memset(layout, 0, sizeof(*layout));
-		memcpy(layout->name, name, name_len);
-		layout->start = start;
-		layout->sectors = sectors;
-		layout->grow = grow;
-		count++;
-		p = strchr(name_end, ')');
-		if(!p)
-			break;
-		p++;
-		if(*p == ',')
-			p++;
-	}
-	return count;
-}
-
-static const struct rockchip_backend_partition_layout * rockchip_backend_find_layout(
-	const struct rockchip_backend_partition_layout * layouts, int count, const char * partition)
-{
-	for(int i = 0; i < count; i++)
-	{
-		if(!strcmp(layouts[i].name, partition))
-			return &layouts[i];
-	}
-	return NULL;
-}
-
-static int rockchip_backend_file_sectors(const char * path, uint64_t * sectors)
-{
-	struct stat st;
-
-	if(stat(path, &st) != 0)
+		libusb_exit(ctx->context);
+		ctx->context = NULL;
 		return 0;
-	*sectors = ((uint64_t)st.st_size + 511) / 512;
+	}
 	return 1;
 }
 
-static void rockchip_backend_join_path(char * out, size_t out_size, const char * dir, const char * file)
+static void backend_destroy_device(struct openrockcli_ctx_t * ctx)
 {
-	snprintf(out, out_size, "%s/%s", dir, file);
+	backend_close_device(ctx);
+	if(ctx && ctx->context)
+	{
+		libusb_exit(ctx->context);
+		ctx->context = NULL;
+	}
 }
 
-static void rockchip_backend_remove_tree(const char * path)
+static int backend_download_loader(struct openrockcli_ctx_t * ctx, const struct rkimage * image,
+	const struct rkimage_item * loader, uint8_t bus, const char * port,
+	rockchip_backend_event_cb cb, void * user)
 {
-	DIR * dir;
-	struct dirent * ent;
-
-	if(!path || !path[0])
-		return;
-	dir = opendir(path);
-	if(!dir)
+	void * data;
+	struct rkloader_ctx_t * lctx;
+	int downloaded = 0;
+	data = malloc((size_t)loader->size);
+	if(!data || !rkimage_read(image, loader->data_offset, data, (size_t)loader->size))
 	{
-		unlink(path);
-		return;
-	}
-	while((ent = readdir(dir)))
-	{
-		char child[1024];
-		struct stat st;
-
-		if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
-			continue;
-		rockchip_backend_join_path(child, sizeof(child), path, ent->d_name);
-		if(lstat(child, &st) == 0 && S_ISDIR(st.st_mode))
-			rockchip_backend_remove_tree(child);
-		else
-			unlink(child);
-	}
-	closedir(dir);
-	rmdir(path);
-}
-
-static int rockchip_backend_flash_partitions(const struct rockchip_flash_request * request,
-	const struct rockchip_firmware_info * info, rockchip_backend_event_cb cb, void * user)
-{
-	const char * tool = rockchip_backend_upgrade_tool();
-	char tmp_template[] = "/tmp/openrockcli-fw-XXXXXX";
-	char * tmpdir;
-	struct rockchip_backend_partition_layout layouts[ROCKCHIP_BACKEND_MAX_FW_ENTRIES];
-	int layout_count = 0;
-	int flashed = 0;
-	int unsupported = 0;
-	int ok = 1;
-
-	tmpdir = mkdtemp(tmp_template);
-	if(!tmpdir)
-	{
-		rockchip_backend_report(cb, user, "Error: failed to create temporary directory: %s", strerror(errno));
+		free(data);
+		backend_report(cb, user, "Error: cannot read embedded MiniLoader");
 		return 0;
 	}
-	rockchip_backend_report(cb, user, "Extracting firmware entries...");
+	lctx = rkloader_ctx_alloc_data(data, loader->size);
+	free(data);
+	if(!lctx)
 	{
-		char * const exf_args[] = { (char *)tool, "EXF", (char *)request->firmware, tmpdir, NULL };
-		if(!rockchip_backend_run_tool_capture(exf_args, cb, user))
+		backend_report(cb, user, "Error: embedded MiniLoader is invalid");
+		return 0;
+	}
+	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Downloading Loader", -1);
+	for(int i = 0; i < lctx->nentry; i++)
+	{
+		struct rkloader_entry_t * entry = lctx->entry[i];
+		if(entry->type == RKLOADER_ENTRY_471 || entry->type == RKLOADER_ENTRY_472)
 		{
-			rockchip_backend_remove_tree(tmpdir);
-			return 0;
+			char name[64];
+			void * payload = (uint8_t *)lctx->buffer + get_unaligned_le32(&entry->data_offset);
+			uint32_t size = get_unaligned_le32(&entry->data_size);
+			uint32_t delay = get_unaligned_le32(&entry->data_delay);
+			backend_report(cb, user, "Downloading %s", loader_wide2str(name, (uint8_t *)entry->name, sizeof(entry->name)));
+			rock_maskrom_upload_memory(ctx, entry->type == RKLOADER_ENTRY_471 ? 0x471 : 0x472,
+				payload, size, lctx->is_rc4on);
+			backend_sleep_ms(delay ? delay : 10);
+			downloaded++;
 		}
 	}
+	rkloader_ctx_free(lctx);
+	if(!downloaded)
+		return 0;
+	backend_destroy_device(ctx);
+	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Reconnecting", -1);
+	for(int attempt = 0; attempt < 60; attempt++)
 	{
-		char parameter[1024];
-
-		rockchip_backend_join_path(parameter, sizeof(parameter), tmpdir, "parameter.txt");
-		layout_count = rockchip_backend_parse_partition_layout(parameter, layouts, ARRAY_SIZE(layouts));
-		if(layout_count > 0)
-			rockchip_backend_report(cb, user, "Loaded partition layout from parameter.txt.");
+		backend_sleep_ms(250);
+		if(backend_open_device(ctx, bus, port))
+		{
+			if(!ctx->maskrom || rock_ready(ctx))
+			{
+				ctx->maskrom = 0;
+				return 1;
+			}
+		}
+		backend_destroy_device(ctx);
 	}
+	backend_report(cb, user, "Error: Loader device did not reconnect");
+	return 0;
+}
 
-	for(int i = 0; i < info->entry_count; i++)
+struct backend_progress {
+	uint64_t done;
+	uint64_t total;
+	int last_percent;
+};
+
+static void backend_progress_update(struct backend_progress * progress, uint64_t bytes,
+	rockchip_backend_event_cb cb, void * user)
+{
+	int percent;
+	progress->done += bytes;
+	percent = progress->total ? (int)(progress->done * 100 / progress->total) : 100;
+	if(percent != progress->last_percent)
 	{
-		const struct rockchip_firmware_entry * entry = &info->entries[i];
-		const char * flag;
-		char image[1024];
-		char msg[192];
-		char * di_args[] = { (char *)tool, "DI", NULL, NULL, NULL };
-
-		if(!entry->partition[0] || !rockchip_backend_partition_selected(request->partitions, entry->partition))
-			continue;
-		if(!request->partitions && !strcmp(entry->partition, "parameter"))
-			continue;
-		if(!strcmp(entry->partition, "parameter") && strcmp(entry->file, "parameter.txt"))
-			continue;
-		flag = rockchip_backend_partition_flag(entry->partition);
-		if(!entry->file[0])
-		{
-			rockchip_backend_report(cb, user, "Error: partition '%s' has no image file in firmware", entry->partition);
-			ok = 0;
-			continue;
-		}
-		rockchip_backend_join_path(image, sizeof(image), tmpdir, entry->file);
-		if(access(image, R_OK) != 0)
-		{
-			rockchip_backend_report(cb, user, "Error: extracted image missing for partition '%s': %s", entry->partition, image);
-			ok = 0;
-			continue;
-		}
-		snprintf(msg, sizeof(msg), "Flashing partition %s", entry->partition);
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Flashing Partitions", -1);
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
-		if(flag)
-		{
-			di_args[2] = (char *)flag;
-			di_args[3] = image;
-			if(!rockchip_backend_run_tool_capture(di_args, cb, user))
-			{
-				ok = 0;
-				break;
-			}
-		}
-		else
-		{
-			const struct rockchip_backend_partition_layout * layout =
-				rockchip_backend_find_layout(layouts, layout_count, entry->partition);
-			uint64_t image_sectors;
-			char start_arg[32];
-			char size_arg[32];
-			char * wl_args[] = { (char *)tool, "WL", start_arg, size_arg, image, NULL };
-
-			if(!layout)
-			{
-				rockchip_backend_report(cb, user, "Error: partition '%s' is not in parameter.txt", entry->partition);
-				unsupported++;
-				ok = 0;
-				continue;
-			}
-			if(!rockchip_backend_file_sectors(image, &image_sectors) || image_sectors == 0)
-			{
-				rockchip_backend_report(cb, user, "Error: cannot get image size for partition '%s'", entry->partition);
-				ok = 0;
-				continue;
-			}
-			if(!layout->grow && layout->sectors > 0 && image_sectors > layout->sectors)
-			{
-				rockchip_backend_report(cb, user,
-					"Error: image for partition '%s' is larger than parameter.txt partition size",
-					entry->partition);
-				ok = 0;
-				continue;
-			}
-			snprintf(start_arg, sizeof(start_arg), "0x%llx", (unsigned long long)layout->start);
-			snprintf(size_arg, sizeof(size_arg), "0x%llx", (unsigned long long)image_sectors);
-			snprintf(msg, sizeof(msg), "Writing partition %s at LBA %s", entry->partition, start_arg);
-			rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
-			if(!rockchip_backend_run_tool_capture(wl_args, cb, user))
-			{
-				ok = 0;
-				break;
-			}
-		}
-		flashed++;
+		progress->last_percent = percent;
+		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_PROGRESS, "Flashing Partitions", percent);
 	}
+}
 
-	if(!flashed && !unsupported)
+static int backend_write_item(struct openrockcli_ctx_t * ctx, const struct rkimage * image,
+	const struct rkimage_item * item, uint32_t lba, int * verify,
+	struct backend_progress * progress, rockchip_backend_event_cb cb, void * user)
+{
+	FILE * fp = fopen(image->path, "rb");
+	uint8_t * write_buffer = malloc(128 * 512);
+	uint8_t * read_buffer = *verify ? malloc(128 * 512) : NULL;
+	uint64_t remaining = item->size;
+	int ok = 0;
+	if(!fp || !write_buffer || (*verify && !read_buffer) ||
+		rk_fseek(fp, (int64_t)item->data_offset, SEEK_SET) != 0)
+		goto cleanup;
+	while(remaining)
 	{
-		rockchip_backend_report(cb, user, "Error: no selected partitions can be flashed");
-		ok = 0;
+		size_t bytes = remaining > 128 * 512 ? 128 * 512 : (size_t)remaining;
+		uint32_t sectors = (uint32_t)((bytes + 511) / 512);
+		memset(write_buffer, 0, sectors * 512);
+		if(fread(write_buffer, 1, bytes, fp) != bytes ||
+			!rock_flash_write_lba(ctx, lba, sectors, write_buffer))
+			goto cleanup;
+		if(*verify)
+		{
+			int unavailable = lba >= 0x10000;
+			memset(read_buffer, 0, sectors * 512);
+			if(!rock_flash_read_lba(ctx, lba, sectors, read_buffer))
+				goto cleanup;
+			if(memcmp(write_buffer, read_buffer, sectors * 512))
+			{
+				for(size_t index = 0; unavailable && index < sectors * 512; index++)
+					if(read_buffer[index] != 0xcc)
+						unavailable = 0;
+				if(!unavailable)
+					goto cleanup;
+				backend_report(cb, user,
+					"Warning: target Loader blocks reads above 32 MiB; high-address read-back verification is unavailable.");
+				*verify = 0;
+			}
+		}
+		lba += sectors;
+		remaining -= bytes;
+		backend_progress_update(progress, bytes, cb, user);
 	}
-	rockchip_backend_remove_tree(tmpdir);
-	return ok && flashed > 0;
+	ok = 1;
+
+cleanup:
+	if(fp)
+		fclose(fp);
+	free(write_buffer);
+	free(read_buffer);
+	return ok;
+}
+
+static int backend_write_boot(struct openrockcli_ctx_t * ctx, const struct rkimage * image,
+	const struct rkimage_item * loader, int verify, struct backend_progress * progress,
+	rockchip_backend_event_cb cb, void * user)
+{
+	void * data = malloc((size_t)loader->size);
+	struct rkloader_ctx_t * lctx;
+	enum storage_type_t storage;
+	uint32_t boot_lba = 64;
+	uint32_t boot_stride = 0;
+	uint32_t boot_sectors;
+	int boot_copies = 1;
+	void * boot_data = NULL;
+	int ok = 0;
+	if(!data || !rkimage_read(image, loader->data_offset, data, (size_t)loader->size))
+	{
+		free(data);
+		return 0;
+	}
+	lctx = rkloader_ctx_alloc_data(data, loader->size);
+	free(data);
+	if(!lctx || !lctx->idbbuf || !lctx->idblen)
+		goto cleanup;
+	storage = rock_storage_read(ctx);
+	if(storage == STORAGE_TYPE_SPINOR)
+		boot_lba = 128;
+	else if(storage == STORAGE_TYPE_SPINAND)
+	{
+		/* RK3506 SPI NAND uses two complete 256 KiB IDB slots at physical blocks 1 and 3. */
+		boot_lba = 256;
+		boot_stride = 512;
+		boot_copies = 2;
+		backend_report(cb, user, "Erasing SPI NAND GPT/IDB reserve (first 1 MiB)");
+		if(!rock_flash_erase_lba(ctx, 0, 2048))
+			goto cleanup;
+	}
+	boot_sectors = (uint32_t)((lctx->idblen + 511) / 512);
+	boot_data = lctx->idbbuf;
+	if(storage == STORAGE_TYPE_SPINAND)
+	{
+		boot_sectors = 512;
+		boot_data = calloc(1, (size_t)boot_sectors * 512);
+		if(!boot_data)
+			goto cleanup;
+		memcpy(boot_data, lctx->idbbuf, (size_t)lctx->idblen);
+	}
+	for(int copy = 0; copy < boot_copies; copy++)
+	{
+		uint32_t target = boot_lba + copy * boot_stride;
+		backend_report(cb, user, "Writing bootloader IDB copy %d/%d at LBA 0x%x",
+			copy + 1, boot_copies, target);
+		if(!rock_flash_write_lba(ctx, target, boot_sectors, boot_data))
+			goto cleanup;
+		if(verify)
+		{
+			void * check = calloc(1, (size_t)boot_sectors * 512);
+			if(!check || !rock_flash_read_lba(ctx, target,
+				boot_sectors, check) ||
+				memcmp(check, boot_data, (size_t)boot_sectors * 512))
+			{
+				free(check);
+				goto cleanup;
+			}
+			free(check);
+		}
+	}
+	if(boot_data != lctx->idbbuf)
+	{
+		free(boot_data);
+		boot_data = NULL;
+	}
+	backend_progress_update(progress, loader->size, cb, user);
+	ok = 1;
+
+cleanup:
+	if(boot_data && (!lctx || boot_data != lctx->idbbuf))
+		free(boot_data);
+	if(lctx)
+		rkloader_ctx_free(lctx);
+	return ok;
+}
+
+static int backend_write_gpt(struct openrockcli_ctx_t * ctx, const struct rkimage * image,
+	const struct rkimage_item * parameter, uint32_t disk_sectors, int verify,
+	struct backend_progress * progress, rockchip_backend_event_cb cb, void * user)
+{
+	uint8_t * parameter_data = malloc((size_t)parameter->size);
+	uint8_t * master = malloc(RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE);
+	uint8_t * backup = malloc(RKGPT_BACKUP_SECTORS * RKGPT_SECTOR_SIZE);
+	uint8_t * check = verify ? malloc(RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE) : NULL;
+	char error[192] = { 0 };
+	int ok = 0;
+	if(!parameter_data || !master || !backup || (verify && !check) ||
+		!rkimage_read(image, parameter->data_offset, parameter_data, (size_t)parameter->size))
+		goto cleanup;
+	if(!rkgpt_build(parameter_data, (size_t)parameter->size, disk_sectors,
+		master, backup, error, sizeof(error)))
+	{
+		backend_report(cb, user, "Error: cannot generate GPT: %s", error[0] ? error : "invalid parameter");
+		goto cleanup;
+	}
+	backend_report(cb, user, "Writing primary and backup GPT");
+	if(!rock_flash_write_lba(ctx, 0, RKGPT_MASTER_SECTORS, master) ||
+		!rock_flash_write_lba(ctx, disk_sectors - RKGPT_BACKUP_SECTORS,
+			RKGPT_BACKUP_SECTORS, backup))
+		goto cleanup;
+	if(verify)
+	{
+		int unavailable = 1;
+		if(!rock_flash_read_lba(ctx, 0, RKGPT_MASTER_SECTORS, check) ||
+			memcmp(check, master, RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE))
+			goto cleanup;
+		if(!rock_flash_read_lba(ctx, disk_sectors - RKGPT_BACKUP_SECTORS,
+			RKGPT_BACKUP_SECTORS, check))
+			goto cleanup;
+		if(memcmp(check, backup, RKGPT_BACKUP_SECTORS * RKGPT_SECTOR_SIZE))
+		{
+			for(size_t i = 0; i < RKGPT_BACKUP_SECTORS * RKGPT_SECTOR_SIZE; i++)
+				if(check[i] != 0xcc)
+					unavailable = 0;
+			if(!unavailable)
+				goto cleanup;
+			backend_report(cb, user,
+				"Warning: target Loader cannot read the backup GPT address; primary GPT verification passed.");
+		}
+	}
+	backend_progress_update(progress, parameter->size, cb, user);
+	ok = 1;
+
+cleanup:
+	free(parameter_data);
+	free(master);
+	free(backup);
+	free(check);
+	return ok;
+}
+
+static int backend_mode_valid(const char * mode)
+{
+	return !mode || !strcmp(mode, "partition") || !strcmp(mode, "keep_data") ||
+		!strcmp(mode, "partition_erase") || !strcmp(mode, "full_erase");
+}
+
+struct rockchip_backend_cli_state { char stage[96]; };
+
+static void backend_cli_event(const struct rockchip_backend_event * event, void * user)
+{
+	struct rockchip_backend_cli_state * state = user;
+	if(!event)
+		return;
+	if(event->type == ROCKCHIP_BACKEND_EVENT_PROGRESS)
+	{
+		int percent = event->percent < 0 ? 0 : (event->percent > 100 ? 100 : event->percent);
+		int filled = percent * 40 / 100;
+		printf("\rFlashing: [");
+		for(int i = 0; i < 40; i++)
+			putchar(i < filled ? '#' : '-');
+		printf("] %3d%%", percent);
+		fflush(stdout);
+		if(percent == 100)
+			printf("\r\n");
+	}
+	else if(event->type == ROCKCHIP_BACKEND_EVENT_STAGE)
+	{
+		if(!event->text || (state && !strcmp(state->stage, event->text)))
+			return;
+		if(state)
+			snprintf(state->stage, sizeof(state->stage), "%s", event->text);
+		printf("Stage: %s\r\n", event->text);
+	}
+	else if(event->text)
+		printf("%s\r\n", event->text);
 }
 
 int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request,
 	rockchip_backend_event_cb cb, void * user)
 {
-	const char * tool = rockchip_backend_upgrade_tool();
-	const char * post_action = request && request->post_action ? request->post_action : "reboot";
-	const char * firmware = request ? request->firmware : NULL;
-	char * const reset_args[] = { (char *)tool, "UF", (char *)firmware, NULL };
-	char * const noreset_args[] = { (char *)tool, "UF", (char *)firmware, "-noreset", NULL };
-	struct stat st;
-	char size[32];
+	struct rkimage image;
+	struct openrockcli_ctx_t ctx;
 	struct rockchip_device_info devices[32];
+	struct flash_info_t flash_info;
+	struct backend_progress progress = { 0, 0, -1 };
+	const struct rkimage_item * loader;
+	const struct rkimage_item * parameter;
+	const char * mode;
+	const char * post_action;
+	char error[192] = { 0 };
+	uint8_t bus = 0;
+	const char * port = NULL;
 	int device_count;
-	int ok;
-
-	if(!rockchip_backend_firmware_stat_cb(firmware, &st, cb, user))
-		return 0;
-	if(!rockchip_backend_valid_flash_mode(request ? request->mode : NULL))
+	int verify_active;
+	int ok = 0;
+	if(!request || !rkimage_open(request->firmware, &image, error, sizeof(error)))
 	{
-		rockchip_backend_report(cb, user, "Error: unsupported flash mode '%s'", request->mode);
+		backend_report(cb, user, "Error: %s", error[0] ? error : "firmware file not specified");
 		return 0;
 	}
-	if(!rockchip_backend_valid_post_action(post_action))
+	mode = request->mode ? request->mode : "full_erase";
+	post_action = request->post_action ? request->post_action : "reboot";
+	if(!backend_mode_valid(mode))
 	{
-		rockchip_backend_report(cb, user, "Error: unsupported post action '%s'", post_action);
+		backend_report(cb, user, "Error: unsupported flash mode '%s'", mode);
 		return 0;
 	}
-	if(access(tool, X_OK) != 0 && strchr(tool, '/') != NULL)
+	if(strcmp(post_action, "reboot") && strcmp(post_action, "poweroff") && strcmp(post_action, "shutdown"))
 	{
-		rockchip_backend_report(cb, user, "Error: upgrade_tool not executable: %s (%s)", tool, strerror(errno));
+		backend_report(cb, user, "Error: unsupported post action '%s'", post_action);
 		return 0;
 	}
 	device_count = rockchip_backend_scan_devices(devices, ARRAY_SIZE(devices));
-	if(device_count <= 0)
+	if(!device_count)
 	{
-		rockchip_backend_report(cb, user, "Error: Device not found");
+		backend_report(cb, user, "Error: Device not found");
 		return 0;
 	}
-	if(device_count > 1 && !(request && (request->bus || request->port)))
+	if(device_count > 1 && !request->bus && !request->port)
 	{
-		rockchip_backend_report(cb, user,
-			"Warning: multiple Rockchip devices detected; upgrade_tool may prompt or choose its default device.");
+		backend_report(cb, user, "Error: multiple Rockchip devices detected; specify --bus and --port");
+		return 0;
 	}
-
-	if(request && request->verbose)
+	if(request->bus)
+		bus = (uint8_t)strtoul(request->bus, NULL, 0);
+	if(request->port)
+		port = request->port;
+	else if(device_count == 1)
 	{
-		rockchip_backend_report(cb, user, "Firmware: %s", request->firmware);
-		rockchip_backend_report(cb, user, "Size: %s", rockchip_backend_size(size, sizeof(size), st.st_size));
-		rockchip_backend_report(cb, user, "Mode: %s", request->mode ? request->mode : "full_erase");
-		rockchip_backend_report(cb, user, "Partitions: %s", request->partitions ? request->partitions : "all");
-		rockchip_backend_report(cb, user, "Verify: %s", request->verify ? "true" : "false");
-		rockchip_backend_report(cb, user, "Post action: %s", post_action);
-		if(request->bus || request->port)
-			rockchip_backend_report(cb, user, "Device selector: bus=%s port=%s",
-				request->bus ? request->bus : "-", request->port ? request->port : "-");
+		bus = devices[0].bus;
+		port = devices[0].port;
 	}
-	if(request && (request->bus || request->port))
-		rockchip_backend_report(cb, user,
-			"Warning: upgrade_tool does not expose stable bus/port selection here; flashing the selected Rockusb device.");
-	if(request && request->partitions && (!request->mode || strcmp(request->mode, "partition")))
-		rockchip_backend_report(cb, user,
-			"Warning: partition filtering is accepted for OpenixCLI-style compatibility, but Rockchip update.img flashing uses the package table.");
-	if(request && !request->verify)
-		rockchip_backend_report(cb, user,
-			"Warning: verification is controlled by Rockchip upgrade_tool for update.img packages.");
-	if(!strcmp(post_action, "poweroff") || !strcmp(post_action, "shutdown"))
-		rockchip_backend_report(cb, user,
-			"Warning: Rockchip upgrade_tool has no poweroff/shutdown action for update.img; using -noreset after flash.");
-
-	rockchip_backend_report(cb, user, "Starting flash...");
-	rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Query Device", -1);
-
-	if(request && request->mode && !strcmp(request->mode, "partition"))
+	loader = rkimage_find_item(&image, "bootloader");
+	parameter = rkimage_find_item(&image, "parameter");
+	if(!loader)
 	{
-		struct rockchip_firmware_info info;
-
-		memset(&info, 0, sizeof(info));
-		rockchip_backend_report(cb, user, "Partition mode: extracting update.img and flashing selected entries with upgrade_tool DI.");
-		if(!rockchip_backend_read_firmware_info(request->firmware, &info))
+		backend_report(cb, user, "Error: update.img has no bootloader entry");
+		return 0;
+	}
+	for(int i = 0; i < image.item_count; i++)
+	{
+		const struct rkimage_item * item = &image.items[i];
+		if(!strcmp(item->name, "package-file"))
+			continue;
+		if(backend_selected(request->partitions, item->name))
+			progress.total += item->size;
+	}
+	if(request->verbose)
+		backend_report(cb, user, "Native OpenRockCLI flash: model=%s mode=%s verify=%s bus=%u port=%s",
+			image.model, mode, request->verify ? "true" : "false", bus, port ? port : "-");
+	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Query Device", -1);
+	if(!backend_open_device(&ctx, bus, port))
+	{
+		backend_report(cb, user, "Error: cannot open selected Rockchip device");
+		return 0;
+	}
+	if(ctx.maskrom && !backend_download_loader(&ctx, &image, loader, bus, port, cb, user))
+		goto cleanup;
+	/* RK3506 loaders may report SPI NAND as the current medium before its
+	 * translation layer is selected.  Explicitly switch it, matching the
+	 * vendor Rockusb sequence, before detecting capacity or touching LBAs. */
+	if(rock_storage_read(&ctx) == STORAGE_TYPE_SPINAND)
+	{
+		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Selecting SPI NAND", -1);
+		if(!rock_storage_switch(&ctx, STORAGE_TYPE_SPINAND) || !rock_ready(&ctx))
 		{
-			rockchip_backend_report(cb, user, "Error: failed to inspect firmware package");
-			return 0;
+			backend_report(cb, user, "Error: cannot select target SPI NAND");
+			goto cleanup;
 		}
-		ok = rockchip_backend_flash_partitions(request, &info, cb, user);
-		if(ok)
-		{
-			rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Setting Mode", 100);
-			if(cb)
-			{
-				char msg[96];
-				snprintf(msg, sizeof(msg), "Flash complete! Device will %s.", post_action);
-				rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, 100);
-			}
-			else
-				printf("Flash complete! Device will %s.\r\n", post_action);
-		}
-		else
-			rockchip_backend_report(cb, user, "Flash failed.");
-		return ok;
 	}
-
-	rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Flashing Partitions", -1);
-	if(cb)
+	if(!rock_flash_detect(&ctx, &flash_info))
 	{
-		char msg[256];
-		snprintf(msg, sizeof(msg), "Flashing firmware package with %s", tool);
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, -1);
+		backend_report(cb, user, "Error: cannot detect target flash");
+		goto cleanup;
+	}
+	backend_report(cb, user, "Target flash: %u sectors (%.1f GiB)", flash_info.sector_total,
+		(double)flash_info.sector_total / 2097152.0);
+	if(!strcmp(mode, "full_erase"))
+	{
+		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Erasing", -1);
+		if(!rock_flash_erase_lba(&ctx, 0, flash_info.sector_total))
+		{
+			backend_report(cb, user, "Error: full flash erase failed");
+			goto cleanup;
+		}
+	}
+	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Flashing Partitions", -1);
+	verify_active = request->verify;
+	/* IDB must precede GPT on SPI NAND: preparing the IDB reserve erases the
+	 * first MiB, which contains the primary GPT. */
+	if(backend_selected(request->partitions, loader->name) &&
+		!backend_write_boot(&ctx, &image, loader, request->verify, &progress, cb, user))
+	{
+		backend_report(cb, user, "Error: bootloader write or verification failed");
+		goto cleanup;
+	}
+	if(parameter && backend_selected(request->partitions, parameter->name) &&
+		!backend_write_gpt(&ctx, &image, parameter, flash_info.sector_total,
+			request->verify, &progress, cb, user))
+	{
+		backend_report(cb, user, "Error: GPT write or verification failed");
+		goto cleanup;
+	}
+	for(int i = 0; i < image.item_count; i++)
+	{
+		const struct rkimage_item * item = &image.items[i];
+		uint32_t lba = item->flash_offset;
+		uint64_t needed = (item->size + 511) / 512;
+		if(!backend_selected(request->partitions, item->name) || !strcmp(item->name, "package-file") ||
+			!strcmp(item->name, "bootloader") || !strcmp(item->name, "parameter"))
+			continue;
+		if(lba == UINT32_MAX || needed > item->flash_sectors ||
+			(uint64_t)lba + needed > flash_info.sector_total)
+		{
+			backend_report(cb, user, "Error: invalid target range for partition %s", item->name);
+			goto cleanup;
+		}
+		if(!strcmp(mode, "partition_erase") && !rock_flash_erase_lba(&ctx, lba, item->flash_sectors))
+		{
+			backend_report(cb, user, "Error: erase failed for partition %s", item->name);
+			goto cleanup;
+		}
+		backend_report(cb, user, "Writing %-12s LBA 0x%x, %llu bytes", item->name, lba,
+			(unsigned long long)item->size);
+		if(!backend_write_item(&ctx, &image, item, lba, &verify_active, &progress, cb, user))
+		{
+			backend_report(cb, user, "Error: write or verification failed for partition %s", item->name);
+			goto cleanup;
+		}
+	}
+	if(!strcmp(post_action, "reboot"))
+	{
+		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Setting Mode", 100);
+		if(!rock_reset(&ctx, 0))
+			backend_report(cb, user, "Warning: reset command was not acknowledged");
 	}
 	else
-		printf("Flashing firmware package with %s\r\n", tool);
-	if(!strcmp(post_action, "poweroff") || !strcmp(post_action, "shutdown"))
-		ok = cb ? rockchip_backend_run_tool_capture(noreset_args, cb, user) : rockchip_backend_run_tool(noreset_args);
-	else
-		ok = cb ? rockchip_backend_run_tool_capture(reset_args, cb, user) : rockchip_backend_run_tool(reset_args);
-	if(ok)
-	{
-		rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Setting Mode", 100);
-		if(cb)
-		{
-			char msg[96];
-			snprintf(msg, sizeof(msg), "Flash complete! Device will %s.", post_action);
-			rockchip_backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_LOG, msg, 100);
-		}
-		else
-			printf("Flash complete! Device will %s.\r\n", post_action);
-	}
-	else
-		rockchip_backend_report(cb, user, "Flash failed.");
+		backend_report(cb, user, "Poweroff is not a Rockusb command; leaving the device in Loader mode.");
+	backend_report(cb, user, "Flash complete! Device will %s.", post_action);
+	ok = 1;
+
+cleanup:
+	backend_destroy_device(&ctx);
+	if(!ok)
+		backend_report(cb, user, "Flash failed.");
 	return ok;
 }
 
 int rockchip_backend_flash(const struct rockchip_flash_request * request)
 {
 	struct rockchip_backend_cli_state state;
-
 	memset(&state, 0, sizeof(state));
-	return rockchip_backend_flash_with_cb(request, rockchip_backend_cli_event, &state);
+	return rockchip_backend_flash_with_cb(request, backend_cli_event, &state);
 }
-#else
-static void rockchip_backend_windows_unsupported(const char * command)
-{
-	printf("Error: '%s' is not available in the Windows build because it requires Rockchip upgrade_tool.\r\n",
-		command);
-	printf("Use the Linux build or Rockchip's Windows flashing tool for update.img workflows.\r\n");
-}
-
-int rockchip_backend_list_devices(void)
-{
-	rockchip_backend_windows_unsupported("devices");
-	return 0;
-}
-
-int rockchip_backend_read_firmware_info(const char * firmware, struct rockchip_firmware_info * info)
-{
-	(void)firmware;
-	if(info)
-		memset(info, 0, sizeof(*info));
-	rockchip_backend_windows_unsupported("inspect");
-	return 0;
-}
-
-int rockchip_backend_inspect_firmware(const char * firmware)
-{
-	(void)firmware;
-	rockchip_backend_windows_unsupported("inspect");
-	return 0;
-}
-
-int rockchip_backend_unpack_firmware(const char * firmware, const char * outdir)
-{
-	(void)firmware;
-	(void)outdir;
-	rockchip_backend_windows_unsupported("unpack");
-	return 0;
-}
-
-int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request,
-	rockchip_backend_event_cb cb, void * user)
-{
-	(void)request;
-	(void)cb;
-	(void)user;
-	rockchip_backend_windows_unsupported("flash");
-	return 0;
-}
-
-int rockchip_backend_flash(const struct rockchip_flash_request * request)
-{
-	(void)request;
-	rockchip_backend_windows_unsupported("flash");
-	return 0;
-}
-#endif

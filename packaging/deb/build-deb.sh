@@ -46,7 +46,7 @@ Homepage: https://github.com/dshanpi/openrockcli
 Description: Rockchip firmware flashing CLI
  OpenRockCLI is a command-line and lightweight TUI firmware flashing tool for
  Rockchip SoCs. It supports Rockchip USB scanning, low-level Rockusb commands,
- and update.img workflows through Rockchip upgrade_tool when available.
+ and native Rockchip update.img workflows through OpenRockCLI.
 EOF
 
 cat > "${stage}/DEBIAN/postinst" <<'EOF'

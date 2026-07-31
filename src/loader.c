@@ -255,13 +255,16 @@ char * loader_wide2str(char * str, uint8_t * wide, int len)
 	return str;
 }
 
-struct rkloader_ctx_t * rkloader_ctx_alloc(const char * filename)
+static struct rkloader_ctx_t * rkloader_ctx_parse(void * buffer, uint64_t length)
 {
 	struct rkloader_ctx_t * ctx = calloc(1, sizeof(struct rkloader_ctx_t));
 	if(!ctx)
+	{
+		free(buffer);
 		return NULL;
-
-	ctx->buffer = file_load(filename, &ctx->length);
+	}
+	ctx->buffer = buffer;
+	ctx->length = length;
 	if(!ctx->buffer || ctx->length <= sizeof(struct rkloader_header_t))
 	{
 		if(ctx->buffer)
@@ -334,6 +337,25 @@ struct rkloader_ctx_t * rkloader_ctx_alloc(const char * filename)
 
 	rkloader_ctx_mkidb(ctx);
 	return ctx;
+}
+
+struct rkloader_ctx_t * rkloader_ctx_alloc(const char * filename)
+{
+	uint64_t length = 0;
+	void * buffer = file_load(filename, &length);
+	return rkloader_ctx_parse(buffer, length);
+}
+
+struct rkloader_ctx_t * rkloader_ctx_alloc_data(const void * data, uint64_t length)
+{
+	void * buffer;
+	if(!data || !length || length > SIZE_MAX)
+		return NULL;
+	buffer = malloc((size_t)length);
+	if(!buffer)
+		return NULL;
+	memcpy(buffer, data, (size_t)length);
+	return rkloader_ctx_parse(buffer, length);
 }
 
 void rkloader_ctx_free(struct rkloader_ctx_t * ctx)
