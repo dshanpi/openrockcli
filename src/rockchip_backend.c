@@ -1,6 +1,7 @@
 #include <rockchip_backend.h>
 #include <rkimage.h>
 #include <rkgpt.h>
+#include <rockchip_usb_error.h>
 #include <stdarg.h>
 #include <sys/stat.h>
 
@@ -322,9 +323,14 @@ static int backend_selected(const char * csv, const char * name)
 
 static int backend_open_device(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port)
 {
+	int rc;
 	memset(ctx, 0, sizeof(*ctx));
-	if(libusb_init(&ctx->context) != 0)
+	rc = libusb_init(&ctx->context);
+	if(rc != 0)
+	{
+		ctx->last_usb_error = rc;
 		return 0;
+	}
 	if(!openrockcli_init_selected(ctx, bus, port))
 	{
 		libusb_exit(ctx->context);
@@ -724,7 +730,10 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Query Device", -1);
 	if(!backend_open_device(&ctx, bus, port))
 	{
-		backend_report(cb, user, "Error: cannot open selected Rockchip device");
+		backend_report(cb, user, "Error: %s (%s): %s",
+			rockchip_usb_open_error_code(ctx.last_usb_error),
+			libusb_error_name(ctx.last_usb_error),
+			rockchip_usb_open_recovery(ctx.last_usb_error));
 		return 0;
 	}
 	if(ctx.maskrom && !backend_download_loader(&ctx, &image, loader, bus, port, cb, user))

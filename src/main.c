@@ -364,7 +364,7 @@ static void tui_scan_devices(struct tui_state_t * state)
 
 static void tui_print_title(int width)
 {
-	const char * title = " OpenRockCLI Terminal v1.2.0";
+	const char * title = " OpenRockCLI Terminal v1.2.1";
 	const char * help = "[H]elp  [Q]uit ";
 	int pad = width - (int)strlen(title) - (int)strlen(help);
 
@@ -1133,7 +1133,7 @@ int main(int argc, char * argv[])
 	}
 	if(!strcmp(argv[1], "-V") || !strcmp(argv[1], "--version"))
 	{
-		printf("openrockcli 1.2.0\r\n");
+		printf("openrockcli 1.2.1\r\n");
 		return 0;
 	}
 	if(!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))

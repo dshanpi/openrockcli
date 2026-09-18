@@ -52,6 +52,7 @@ struct openrockcli_ctx_t {
 	libusb_context * context;
 	libusb_device_handle * hdl;
 	struct chip_t * chip;
+	int last_usb_error;
 	int epout;
 	int epin;
 	int maskrom;

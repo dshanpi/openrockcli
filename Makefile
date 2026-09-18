@@ -46,9 +46,14 @@ OBJDIRS		:= $(patsubst %, %, $(SRCDIRS))
 NAME		:= openrockcli
 VPATH		:= $(OBJDIRS)
 
-.PHONY:		all install clean
+.PHONY:		all test install clean
 
 all : $(NAME)
+
+test : $(NAME)
+	@$(CC) $(CFLAGS) $(INCDIRS) tests/rockchip_usb_error_test.c -o tests/rockchip_usb_error_test $(LIBS)
+	@tests/rockchip_usb_error_test
+	@$(RM) tests/rockchip_usb_error_test
 
 $(NAME) : $(OBJS)
 	@echo [LD] Linking $@
@@ -72,4 +77,4 @@ install:
 	install -Dm0644 LICENSE /usr/share/licenses/openrockcli/LICENSE
 
 clean:
-	@$(RM) $(DEPS) $(OBJS) $(NAME).exe $(NAME) *~ src/*~
+	@$(RM) $(DEPS) $(OBJS) $(NAME).exe $(NAME) tests/rockchip_usb_error_test *~ src/*~

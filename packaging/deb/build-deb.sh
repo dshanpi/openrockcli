@@ -12,7 +12,7 @@ if [ -z "${version}" ]; then
     version="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
   fi
 fi
-version="${version:-1.2.0}"
+version="${version:-1.2.1}"
 
 pkg="openrockcli"
 arch="amd64"

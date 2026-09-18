@@ -120,118 +120,112 @@ int openrockcli_scan(libusb_context * context)
 
 static int openrockcli_init_match(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port)
 {
-	if(ctx)
-	{
-		libusb_device ** list = NULL;
-		int found = 0;
+	libusb_device ** list = NULL;
+	ssize_t count;
+	if(!ctx)
+		return 0;
 
-		ctx->hdl = NULL;
-		ctx->chip = NULL;
-		for(int count = 0; (count < libusb_get_device_list(ctx->context, &list)) && !found; count++)
+	ctx->hdl = NULL;
+	ctx->chip = NULL;
+	ctx->last_usb_error = LIBUSB_ERROR_NO_DEVICE;
+	count = libusb_get_device_list(ctx->context, &list);
+	if(count < 0)
+	{
+		ctx->last_usb_error = (int)count;
+		return 0;
+	}
+	for(ssize_t index = 0; index < count; index++)
+	{
+		struct libusb_device_descriptor desc;
+		struct chip_t * chip = &chip_unknown;
+		libusb_device * device = list[index];
+		libusb_device_handle * hdl = NULL;
+		int rc;
+		if(libusb_get_device_descriptor(device, &desc) != 0 || desc.idVendor != 0x2207)
+			continue;
+		if(openrockcli_is_adb(device))
+			continue;
+		if(bus && libusb_get_bus_number(device) != bus)
+			continue;
+		if(port && port[0])
 		{
-			struct libusb_device_descriptor desc;
-			libusb_device * device = list[count];
-			libusb_device_handle * hdl;
-			if(libusb_get_device_descriptor(device, &desc) == 0)
+			uint8_t ports[8] = { 0 };
+			char actual[32] = { 0 };
+			int nports = libusb_get_port_numbers(device, ports, sizeof(ports));
+			int pos = 0;
+			for(int p = 0; p < nports && pos < (int)sizeof(actual) - 1; p++)
+				pos += snprintf(actual + pos, sizeof(actual) - pos, "%s%u", p ? "." : "", ports[p]);
+			if(strcmp(actual, port))
+				continue;
+		}
+		for(int i = 0; i < ARRAY_SIZE(chips); i++)
+		{
+			if(desc.idProduct == chips[i].pid)
 			{
-				if(desc.idVendor == 0x2207)
+				chip = &chips[i];
+				break;
+			}
+		}
+		rc = libusb_open(device, &hdl);
+		if(rc != 0)
+		{
+			ctx->last_usb_error = rc;
+			continue;
+		}
+		ctx->hdl = hdl;
+		ctx->chip = chip;
+#ifndef _WIN32
+		if(libusb_kernel_driver_active(ctx->hdl, 0))
+			libusb_detach_kernel_driver(ctx->hdl, 0);
+#endif
+		rc = libusb_claim_interface(ctx->hdl, 0);
+		if(rc == 0)
+		{
+			struct libusb_config_descriptor * config = NULL;
+			ctx->maskrom = (desc.bcdUSB & 0x0001) == 0x0000;
+			if(ctx->maskrom && desc.iProduct)
+			{
+				unsigned char product[128] = { 0 };
+				if(libusb_get_string_descriptor_ascii(ctx->hdl, desc.iProduct,
+					product, sizeof(product) - 1) > 0 &&
+					(strstr((char *)product, "USB-MSC") || strstr((char *)product, "Loader") ||
+					 strstr((char *)product, "download")))
+					ctx->maskrom = 0;
+			}
+			rc = libusb_get_active_config_descriptor(device, &config);
+			if(rc == 0)
+			{
+				for(int if_idx = 0; if_idx < config->bNumInterfaces; if_idx++)
 				{
-					if(openrockcli_is_adb(device))
-						continue;
-					if(bus && libusb_get_bus_number(device) != bus)
-						continue;
-					if(port && port[0])
+					const struct libusb_interface * iface = config->interface + if_idx;
+					for(int set_idx = 0; set_idx < iface->num_altsetting; set_idx++)
 					{
-						uint8_t ports[8] = { 0 };
-						char actual[32] = { 0 };
-						int nports = libusb_get_port_numbers(device, ports, sizeof(ports));
-						int pos = 0;
-						for(int p = 0; p < nports && pos < (int)sizeof(actual) - 1; p++)
-							pos += snprintf(actual + pos, sizeof(actual) - pos, "%s%u", p ? "." : "", ports[p]);
-						if(strcmp(actual, port))
-							continue;
-					}
-					for(int i = 0; i < ARRAY_SIZE(chips); i++)
-					{
-						if(desc.idProduct == chips[i].pid)
+						const struct libusb_interface_descriptor * setting = iface->altsetting + set_idx;
+						for(int ep_idx = 0; ep_idx < setting->bNumEndpoints; ep_idx++)
 						{
-							if(libusb_open(device, &hdl) == 0)
-							{
-								ctx->hdl = hdl;
-								ctx->chip = &chips[i];
-								found = 1;
-								break;
-							}
-						}
-					}
-					if(!found)
-					{
-						if(libusb_open(device, &hdl) == 0)
-						{
-							ctx->hdl = hdl;
-							ctx->chip = &chip_unknown;
-							found = 1;
-							break;
+							const struct libusb_endpoint_descriptor * ep = setting->endpoint + ep_idx;
+							if((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) != LIBUSB_TRANSFER_TYPE_BULK)
+								continue;
+							if((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
+								ctx->epin = ep->bEndpointAddress;
+							else
+								ctx->epout = ep->bEndpointAddress;
 						}
 					}
 				}
+				libusb_free_config_descriptor(config);
+				ctx->last_usb_error = 0;
+				libusb_free_device_list(list, 1);
+				return 1;
 			}
+			libusb_release_interface(ctx->hdl, 0);
 		}
-
-		if(ctx->hdl && ctx->chip && found)
-		{
-#ifndef _WIN32
-			if(libusb_kernel_driver_active(ctx->hdl, 0))
-				libusb_detach_kernel_driver(ctx->hdl, 0);
-#endif
-
-			if(libusb_claim_interface(ctx->hdl, 0) == 0)
-			{
-				struct libusb_device_descriptor desc;
-				if(libusb_get_device_descriptor(libusb_get_device(ctx->hdl), &desc) == 0)
-				{
-					if((desc.bcdUSB & 0x0001) == 0x0000)
-						ctx->maskrom = 1;
-					else
-						ctx->maskrom = 0;
-					if(ctx->maskrom && desc.iProduct)
-					{
-						unsigned char product[128] = { 0 };
-						if(libusb_get_string_descriptor_ascii(ctx->hdl, desc.iProduct,
-							product, sizeof(product) - 1) > 0 &&
-							(strstr((char *)product, "USB-MSC") || strstr((char *)product, "Loader") ||
-							 strstr((char *)product, "download")))
-							ctx->maskrom = 0;
-					}
-
-					struct libusb_config_descriptor * config;
-					if(libusb_get_active_config_descriptor(libusb_get_device(ctx->hdl), &config) == 0)
-					{
-						for(int if_idx = 0; if_idx < config->bNumInterfaces; if_idx++)
-						{
-							const struct libusb_interface * iface = config->interface + if_idx;
-							for(int set_idx = 0; set_idx < iface->num_altsetting; set_idx++)
-							{
-								const struct libusb_interface_descriptor * setting = iface->altsetting + set_idx;
-								for(int ep_idx = 0; ep_idx < setting->bNumEndpoints; ep_idx++)
-								{
-									const struct libusb_endpoint_descriptor * ep = setting->endpoint + ep_idx;
-									if((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) != LIBUSB_TRANSFER_TYPE_BULK)
-										continue;
-									if((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
-										ctx->epin = ep->bEndpointAddress;
-									else
-										ctx->epout = ep->bEndpointAddress;
-								}
-							}
-						}
-						libusb_free_config_descriptor(config);
-						return 1;
-					}
-		    	}
-		    }
-		}
+		ctx->last_usb_error = rc;
+		libusb_close(ctx->hdl);
+		ctx->hdl = NULL;
+		ctx->chip = NULL;
 	}
+	libusb_free_device_list(list, 1);
 	return 0;
 }
 
