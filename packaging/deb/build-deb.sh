@@ -6,8 +6,10 @@ cd "${root_dir}"
 
 version="${OPENROCKCLI_VERSION:-}"
 if [ -z "${version}" ]; then
-  if [ -n "${GITHUB_REF_NAME:-}" ]; then
+  if [[ "${GITHUB_REF_NAME:-}" =~ ^v[0-9] ]]; then
     version="${GITHUB_REF_NAME#v}"
+  elif [ -x ./openrockcli ]; then
+    version="$(./openrockcli --version | awk 'NR == 1 { print $2 }' | tr -d '\r')"
   else
     version="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
   fi
