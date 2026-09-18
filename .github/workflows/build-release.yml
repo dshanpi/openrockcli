@@ -92,11 +92,12 @@ jobs:
           mkdir -p "dist/${name}"
           cp openrockcli.exe README.md LICENSE "dist/${name}/"
           ldd openrockcli.exe |
-            awk '/msys64/ { print $3 }' |
+            awk '/ucrt64/ { print $3 }' |
             sort -u |
             while read -r dll; do
               [ -n "${dll}" ] && cp "${dll}" "dist/${name}/"
             done
+          test -f "dist/${name}/libusb-1.0.dll"
 
       - name: Create zip
         shell: pwsh
