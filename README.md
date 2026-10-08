@@ -10,7 +10,10 @@ OpenixCLI-compatible workflow for scanning devices and flashing Rockchip
 - Device scanning with USB bus/port, mode, VID/PID, and chip name
 - OpenixCLI-compatible commands: `scan`, `flash`, `tui`
 - Rockchip firmware helper commands: `devices`, `inspect`, `unpack`
-- Rockchip `update.img` flashing through the SDK bundled `upgrade_tool`
+- Native Rockchip `update.img` inspection, extraction, and flashing
+- Embedded MiniLoader download from Maskrom and automatic Loader reconnection
+- Streaming partition writes with optional read-back verification
+- Native primary/backup GPT generation from packaged Rockchip parameters
 - Firmware info and extraction helpers
 - Original low-level maskrom, storage, flash, OTP, and vendor storage commands
 
@@ -22,17 +25,21 @@ flowchart LR
     cli --> parser[Command parser and TUI]
     parser --> backend[Rockchip firmware backend]
     parser --> lowlevel[Low-level Rockusb commands]
-    backend --> upgrade[Rockchip upgrade_tool]
-    backend --> image[update.img inspector / unpacker]
-    lowlevel --> libusb[libusb-1.0]
-    upgrade --> device[Rockchip device in Loader or Maskrom]
+    backend --> image[Native RKFW / RKAF parser]
+    image --> stream[Partition stream writer]
+    stream --> lowlevel
+    lowlevel --> transport[USB transport]
+    transport --> libusb[Linux/macOS: libusb-1.0]
+    transport --> native[Windows: rockusb.sys]
+    native --> device[Rockchip device in Loader or Maskrom]
     libusb --> device
 ```
 
 The OpenixCLI-style commands (`scan`, `flash`, `devices`, `inspect`, `unpack`,
-and `tui`) live in the CLI layer. Firmware package flashing is delegated to the
-Rockchip `upgrade_tool` when that is the safest path. The original low-level
-Rockusb commands continue to use libusb directly.
+and `tui`) live in the CLI layer. Firmware parsing and flashing are implemented
+inside OpenRockCLI. Linux/macOS use libusb; Windows talks directly to the
+manufacturer `rockusb.sys` driver through Win32 file I/O. No external Rockchip
+flashing program is required.
 
 ## Source Layout
 
@@ -74,53 +81,48 @@ make
 sudo make install
 ```
 
-The `flash`, `devices`, `inspect`, and `unpack` commands use the
-Rockchip `upgrade_tool`. By default openrockcli searches the SDK bundled tool at:
+### Windows platform
+
+Windows builds use the native `rockusb.sys` backend. Keep the manufacturer's
+Rockusb driver installed; do not replace it with WinUSB/Zadig for this build.
+No libusb DLL, vendor CLI, vendor DLL, or `config.ini` is required.
+
+Cross-compile on Linux with MinGW-w64:
 
 ```shell
-tools/linux/Linux_Upgrade_Tool/Linux_Upgrade_Tool/upgrade_tool
+make -f Makefile.win -j4 test-build
 ```
 
-You can override it:
+Or build and run offline tests in MSYS2 UCRT64 (GCC, make, Python):
 
 ```shell
-OPENROCKCLI_UPGRADE_TOOL=/path/to/upgrade_tool openrockcli devices
+make -j4 test NAME=openrockcli.exe
 ```
 
-### Window platform
-
-Install some build tools
+To create a Windows x64 installer from the built executable, install NSIS 3
+with `amd64-unicode` support and run:
 
 ```shell
-sudo apt install mingw-w64
-sudo apt install autoconf
-sudo apt install libtool-bin
+python3 packaging/windows/build-installer.py
 ```
 
-Download and install libusb
+The installer and SHA-256 checksum are written to `.build/artifacts/`. It
+installs for the current user, adds desktop/Start menu command-window shortcuts
+and an uninstaller, and keeps the manufacturer's USB driver in place. The
+installer supports Simplified Chinese and English. It is an unsigned native
+backend development preview, with hardware validation still pending.
 
-```shell
-git clone https://github.com/libusb/libusb.git
-cd libusb
-./autogen.sh
-./configure --host=x86_64-w64-mingw32 --prefix=/usr/x86_64-w64-mingw32/
-make
-sudo make install
-```
+The 2026-10-08 full LYNX Windows candidate has completed a user-confirmed
+A1/CM5 flash, with MCP recording successful device-checksum verification and
+exit code 0. This qualifies that observed workflow, not every driver/Loader
+version or the standalone CLI installer. Read
+[Windows transport and validation](docs/WINDOWS_ROCKUSB.md) and the
+[local source handoff](docs/LOCAL_HANDOFF.md) for the scope and evidence.
 
-Build openrockcli source code
-
-```shell
-cd openrockcli
-CROSS=x86_64-w64-mingw32- make -f Makefile.win
-```
-
-For 32-bits windows, you can using `i686-w64-mingw32-` instead of `x86_64-w64-mingw32` above.
-
-The release workflow builds the Windows package with MSYS2 UCRT64 and includes
-the required runtime DLLs in the zip package. The Windows build supports USB
-scanning and low-level libusb commands. `update.img` workflows that shell out to
-Rockchip `upgrade_tool` are available in the Linux build.
+Windows `scan` reports bus `0` and the full Windows USB location path in the
+Port column. Copy the entire path (quoted) into `--port`; old libusb bus/port
+bindings are not translated or silently accepted. Rebind the saved LYNX USB
+location from a new scan before flashing through LYNX.
 
 ## OpenixCLI-Compatible Usage
 
@@ -146,7 +148,7 @@ Scan for Rockchip USB devices:
 openrockcli scan
 ```
 
-List devices through Rockchip `upgrade_tool`:
+List Rockusb devices:
 
 ```shell
 openrockcli devices
@@ -180,7 +182,8 @@ openrockcli flash update.img [options]
 | `--no-verify` | | Disable verification preference |
 | `--mode` | `-m` | `partition`, `keep_data`, `partition_erase`, or `full_erase` |
 | `--partitions` | `-p` | Comma-separated partition names for `--mode partition` |
-| `--post-action` | `-a` | `reboot`, `poweroff`, or `shutdown` |
+| `--post-action` | `-a` | `reboot`, `none`, `poweroff`, or `shutdown` |
+| `--noreset` | | Leave the device in Loader mode (same as `--post-action none`) |
 | `--verbose` | `-v` | Print selected options |
 
 Examples:
@@ -195,19 +198,29 @@ openrockcli flash update.img --mode partition --partitions rootfs,oem,userdata
 
 Notes:
 
-- Rockchip `update.img` flashing is delegated to `upgrade_tool UF`.
-- `--mode partition` extracts `update.img` with `upgrade_tool EXF` and flashes
-  selected entries. Known `upgrade_tool DI` partitions use `DI`; other package
-  entries such as `rootfs`, `oem`, and `userdata` are written by parsing
-  `parameter.txt` and calling `upgrade_tool WL`.
-- Current partition flashing supports `boot`, `uboot`, `misc`, `recovery`,
-  `kernel`, `system`, `trust`, `resource`, `rootfs`, `oem`, and `userdata`.
-- Bus/port, non-partition modes, and verify options are accepted for an
-  OpenixCLI-compatible command surface; `upgrade_tool` ultimately controls how
-  Rockchip update packages are applied.
-- `poweroff` and `shutdown` map to Rockchip `upgrade_tool UF -noreset`,
-  because `upgrade_tool` does not expose a real power-off action for
-  `update.img` flashing.
+- OpenRockCLI parses the outer RKFW header and embedded RKAF package table
+  directly. Partition locations come from the package table, so no SDK tool or
+  shell process is involved.
+- GPT firmware parameters are converted to primary and backup GPT tables;
+  SPI NAND IDB copies are written before GPT so the partition table is not
+  erased while preparing the boot reserve.
+- In Maskrom mode, the packaged MiniLoader is downloaded and OpenRockCLI waits
+  for the same physical USB port to reconnect in Loader mode.
+- `--verify true` queries Loader capabilities before erasing. Full READ_LBA support
+  selects host byte-for-byte readback. A Loader that restricts host readback but
+  advertises LBAwrite Parity selects Rockchip's device-side media checksum instead:
+  after every write, the Loader reads the media and validates the supplied 32-bit
+  additive checksum. The log identifies `host-readback` or `device-checksum`.
+  Device checksum is not a cryptographic hash or a byte-for-byte comparison.
+  Capability, transfer or verification failures stop the task; there is no
+  fallback after failure. A zero checksum would disable the vendor check, so that
+  write request is rejected before any of its commands are sent.
+- `--mode partition` writes only the comma-separated RKAF entries selected by
+  `--partitions`; it does not extract the package to a temporary directory.
+- `poweroff` and `shutdown` request Rockusb reset subcode `0x02` and require its
+  acknowledgement; `reboot` requests a normal reset. `none`/`--noreset` sends no
+  reset and leaves the device in Loader mode. Physical power behaviour depends
+  on the board's Loader.
 - For raw sector operations, use the original low-level `openrockcli flash read`,
   `openrockcli flash write`, and `openrockcli flash erase` commands below.
 
@@ -225,10 +238,10 @@ usage:
     openrockcli                              - Launch interactive TUI
     openrockcli tui                          - Launch interactive TUI
     openrockcli scan                         - List connected Rockchip USB devices
-    openrockcli devices                      - List Rockusb devices with upgrade_tool
+    openrockcli devices                      - List Rockusb devices
     openrockcli inspect <firmware.img>       - Inspect Rockchip firmware package
     openrockcli unpack <firmware.img> <dir>  - Unpack Rockchip firmware package
-    openrockcli flash <firmware.img> [opts]  - Flash Rockchip update.img via upgrade_tool
+    openrockcli flash <firmware.img> [opts]  - Flash Rockchip update.img natively
     openrockcli maskrom <ddr> <usbplug> [--rc4-off]    - Initial chip using ddr and usbplug in maskrom mode
     openrockcli download <loader>                      - Initial chip using loader in maskrom mode
     openrockcli upgrade <loader>                       - Upgrade loader to flash in loader mode
@@ -586,12 +599,12 @@ flowchart LR
     windows --> artifacts
     tag[v* tag] --> release[GitHub Release]
     artifacts --> release
-    secret[CI_GITHUB secret] --> release
+    permissions[Repository GITHUB_TOKEN] --> release
 ```
 
 To publish a release:
 
-1. Add a repository secret named `CI_GITHUB` with release permission.
+1. Ensure GitHub Actions has `contents: write` permission for releases.
 2. Push a version tag:
 
 ```shell

@@ -6,13 +6,15 @@ cd "${root_dir}"
 
 version="${OPENROCKCLI_VERSION:-}"
 if [ -z "${version}" ]; then
-  if [ -n "${GITHUB_REF_NAME:-}" ]; then
+  if [[ "${GITHUB_REF_NAME:-}" =~ ^v[0-9] ]]; then
     version="${GITHUB_REF_NAME#v}"
+  elif [ -x ./openrockcli ]; then
+    version="$(./openrockcli --version | awk 'NR == 1 { print $2 }' | tr -d '\r')"
   else
     version="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
   fi
 fi
-version="${version:-1.2.0}"
+version="${version:-1.2.1}"
 
 pkg="openrockcli"
 arch="amd64"
@@ -46,7 +48,7 @@ Homepage: https://github.com/dshanpi/openrockcli
 Description: Rockchip firmware flashing CLI
  OpenRockCLI is a command-line and lightweight TUI firmware flashing tool for
  Rockchip SoCs. It supports Rockchip USB scanning, low-level Rockusb commands,
- and update.img workflows through Rockchip upgrade_tool when available.
+ and native Rockchip update.img workflows through OpenRockCLI.
 EOF
 
 cat > "${stage}/DEBIAN/postinst" <<'EOF'

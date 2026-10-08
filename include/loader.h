@@ -71,6 +71,7 @@ struct rkloader_ctx_t {
 
 char * loader_wide2str(char * str, uint8_t * wide, int len);
 struct rkloader_ctx_t * rkloader_ctx_alloc(const char * filename);
+struct rkloader_ctx_t * rkloader_ctx_alloc_data(const void * data, uint64_t length);
 void rkloader_ctx_free(struct rkloader_ctx_t * ctx);
 
 #ifdef __cplusplus

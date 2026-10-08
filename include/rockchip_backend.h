@@ -7,7 +7,7 @@ extern "C" {
 
 #include <rock.h>
 
-#define ROCKCHIP_BACKEND_MAX_PORT	32
+#define ROCKCHIP_BACKEND_MAX_PORT	512
 #define ROCKCHIP_BACKEND_MAX_FW_ENTRIES	64
 #define ROCKCHIP_BACKEND_MAX_NAME	64
 
@@ -27,6 +27,8 @@ struct rockchip_firmware_entry {
 	char type[ROCKCHIP_BACKEND_MAX_NAME];
 	uint64_t offset;
 	uint64_t size;
+	uint64_t flash_offset;
+	uint64_t flash_sectors;
 };
 
 struct rockchip_firmware_info {
@@ -65,7 +67,6 @@ struct rockchip_backend_event {
 
 typedef void (*rockchip_backend_event_cb)(const struct rockchip_backend_event * event, void * user);
 
-const char * rockchip_backend_upgrade_tool(void);
 int rockchip_backend_scan_devices(struct rockchip_device_info * devices, int max_devices);
 int rockchip_backend_scan(int detailed, int verbose);
 int rockchip_backend_list_devices(void);

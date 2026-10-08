@@ -53,6 +53,8 @@ static int modern_flash(int argc, char * argv[])
 			else
 				verify = 1;
 		}
+		else if(!strcmp(argv[i], "--noreset"))
+			post_action = "none";
 		else if(!strcmp(argv[i], "--no-verify"))
 			verify = 0;
 		else if((!strcmp(argv[i], "-m") || !strcmp(argv[i], "--mode")) && (i + 1 < argc))
@@ -89,7 +91,7 @@ static int modern_flash(int argc, char * argv[])
 		return 0;
 	}
 	if(strcmp(post_action, "reboot") && strcmp(post_action, "poweroff") &&
-		strcmp(post_action, "shutdown"))
+		strcmp(post_action, "shutdown") && strcmp(post_action, "none"))
 	{
 		printf("Error: unsupported post action '%s'\r\n", post_action);
 		return 0;
@@ -351,6 +353,12 @@ static void tui_scan_devices(struct tui_state_t * state)
 	state->selected_device = 0;
 	state->device_count = rockchip_backend_scan_devices(state->devices, TUI_MAX_DEVICES);
 
+	if(state->device_count < 0)
+	{
+		tui_log(state, "ERRO", rk_usb_error_name(state->device_count));
+		state->device_count = 0;
+		return;
+	}
 	if(state->device_count)
 	{
 		char msg[96];
@@ -364,7 +372,7 @@ static void tui_scan_devices(struct tui_state_t * state)
 
 static void tui_print_title(int width)
 {
-	const char * title = " OpenRockCLI Terminal v1.2.0";
+	const char * title = " OpenRockCLI Terminal v1.2.1";
 	const char * help = "[H]elp  [Q]uit ";
 	int pad = width - (int)strlen(title) - (int)strlen(help);
 
@@ -424,7 +432,7 @@ static void tui_draw_help(int width, int height)
 		" V            Toggle verify",
 		" A            Cycle post action / Select all parts",
 		" Space        Toggle partition selection",
-		" D            Show upgrade_tool devices",
+		" D            Show Rockusb devices",
 		" H            Toggle this help",
 		" Ctrl+C       Abort / Quit",
 		"",
@@ -730,7 +738,7 @@ static int tui(void)
 		printf("openrockcli interactive flasher\r\n");
 		printf("1. Scan devices\r\n");
 		printf("2. Flash update.img firmware\r\n");
-		printf("3. List Rockusb devices with upgrade_tool\r\n");
+		printf("3. List Rockusb devices\r\n");
 		printf("4. Quit\r\n");
 		printf("> ");
 		fflush(stdout);
@@ -758,7 +766,7 @@ static int tui(void)
 			return rockchip_backend_flash(&request) ? 0 : 1;
 		}
 		if(choice == 3)
-			return rockchip_backend_list_devices() ? 0 : 1;
+			return rockchip_backend_list_devices() > 0 ? 0 : 1;
 		return 0;
 	}
 
@@ -814,7 +822,7 @@ static int tui(void)
 			if(raw_enabled)
 				tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
 			tui_read_key();
-			tui_log(&state, "INFO", "upgrade_tool device listing finished.");
+			tui_log(&state, "INFO", "Rockusb device listing finished.");
 			tui_draw(&state);
 		}
 		else if(key == 'f' || key == 'F' || key == 'b' || key == 'B')
@@ -949,8 +957,8 @@ static int tui(void)
 
 	printf("openrockcli interactive flasher\r\n");
 	printf("1. Scan devices\r\n");
-	printf("2. Flash update.img firmware (not available in Windows build)\r\n");
-	printf("3. List Rockusb devices with upgrade_tool (not available in Windows build)\r\n");
+	printf("2. Flash update.img firmware\r\n");
+	printf("3. List Rockusb devices\r\n");
 	printf("4. Quit\r\n");
 	printf("> ");
 	fflush(stdout);
@@ -962,11 +970,23 @@ static int tui(void)
 		rockchip_backend_scan(0, 0);
 		return 0;
 	}
-	if(choice == 2 || choice == 3)
+	if(choice == 2)
 	{
-		printf("Error: this Windows build does not run Rockchip upgrade_tool workflows.\r\n");
-		return 1;
+		struct rockchip_flash_request request;
+		printf("Firmware path: ");
+		fflush(stdout);
+		if(!fgets(line, sizeof(line), stdin))
+			return 0;
+		line[strcspn(line, "\r\n")] = 0;
+		memset(&request, 0, sizeof(request));
+		request.firmware = line;
+		request.mode = "full_erase";
+		request.post_action = "reboot";
+		request.verify = 1;
+		return rockchip_backend_flash(&request) ? 0 : 1;
 	}
+	if(choice == 3)
+		return rockchip_backend_list_devices() > 0 ? 0 : 1;
 	return 0;
 }
 #endif
@@ -983,7 +1003,7 @@ static void usage(void)
 	printf("  inspect  Inspect firmware contents (image header and package table)\r\n");
 	printf("  unpack   Unpack firmware data to disk\r\n");
 	printf("  tui      Launch interactive TUI mode\r\n");
-	printf("  devices  List Rockusb devices with upgrade_tool\r\n");
+	printf("  devices  List Rockusb devices\r\n");
 	printf("  help     Print this message or the help of the given subcommand(s)\r\n");
 	printf("\r\n");
 	printf("Options:\r\n");
@@ -1059,9 +1079,10 @@ static void command_help(const char * command)
 		printf("  -P, --port <PORT>                USB port number\r\n");
 		printf("  -V, --verify <VERIFY>            Enable verification after write [default: true] [possible values: true, false]\r\n");
 		printf("      --no-verify                  Disable verification preference\r\n");
+		printf("      --noreset                    Leave the device in Loader mode after flashing\r\n");
 		printf("  -m, --mode <MODE>                Flash mode: partition, keep_data, partition_erase, full_erase [default: full_erase]\r\n");
 		printf("  -p, --partitions <PARTITIONS>    Partitions to flash in partition mode (boot,uboot,misc,recovery,rootfs,oem,userdata,...)\r\n");
-		printf("  -a, --post-action <POST_ACTION>  Post-flash action: reboot, poweroff, shutdown [default: reboot]\r\n");
+		printf("  -a, --post-action <POST_ACTION>  Post-flash action: reboot, none, poweroff, shutdown [default: reboot]\r\n");
 		printf("  -v, --verbose                    Enable verbose output\r\n");
 		printf("  -h, --help                       Print help\r\n");
 		return;
@@ -1077,7 +1098,7 @@ static void command_help(const char * command)
 	}
 	if(!strcmp(command, "devices"))
 	{
-		printf("List Rockusb devices with upgrade_tool\r\n\r\n");
+		printf("List Rockusb devices\r\n\r\n");
 		printf("Usage: openrockcli devices\r\n");
 		return;
 	}
@@ -1102,7 +1123,7 @@ static void command_help(const char * command)
 	usage();
 }
 
-int main(int argc, char * argv[])
+int openrockcli_main(int argc, char * argv[])
 {
 	struct openrockcli_ctx_t ctx;
 
@@ -1121,7 +1142,7 @@ int main(int argc, char * argv[])
 	}
 	if(!strcmp(argv[1], "-V") || !strcmp(argv[1], "--version"))
 	{
-		printf("openrockcli 1.2.0\r\n");
+		printf("openrockcli 1.2.1\r\n");
 		return 0;
 	}
 	if(!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))
@@ -1167,8 +1188,7 @@ int main(int argc, char * argv[])
 			printf("Error: unsupported scan option '%s'\r\n", argv[i]);
 			return 1;
 		}
-		rockchip_backend_scan(detailed, verbose);
-		return 0;
+		return rockchip_backend_scan(detailed, verbose) < 0 ? 1 : 0;
 	}
 	if(!strcmp(argv[1], "devices"))
 	{
@@ -1177,7 +1197,7 @@ int main(int argc, char * argv[])
 			command_help("devices");
 			return 0;
 		}
-		return rockchip_backend_list_devices() ? 0 : 1;
+		return rockchip_backend_list_devices() > 0 ? 0 : 1;
 	}
 	if(!strcmp(argv[1], "inspect") || !strcmp(argv[1], "info"))
 	{
@@ -1219,13 +1239,11 @@ int main(int argc, char * argv[])
 		return modern_flash(argc, argv) ? 0 : 1;
 	}
 
-	libusb_init(&ctx.context);
+	memset(&ctx, 0, sizeof(ctx));
 	if(!openrockcli_init(&ctx))
 	{
 		printf("Error: Device not found\r\n");
-		if(ctx.hdl)
-			libusb_close(ctx.hdl);
-		libusb_exit(ctx.context);
+		rk_usb_close(&ctx);
 		return -1;
 	}
 	if(!strcmp(argv[1], "maskrom"))
@@ -2140,9 +2158,29 @@ int main(int argc, char * argv[])
 	}
 	else
 		usage();
-	if(ctx.hdl)
-		libusb_close(ctx.hdl);
-	libusb_exit(ctx.context);
+	rk_usb_close(&ctx);
 
 	return 0;
 }
+
+#ifndef _WIN32
+int main(int argc, char **argv) { return openrockcli_main(argc, argv); }
+#else
+int wmain(int argc, wchar_t **wide)
+{
+ char **argv = calloc((size_t)argc + 1, sizeof(*argv));
+ int result = 1;
+ SetConsoleOutputCP(CP_UTF8);
+ SetConsoleCP(CP_UTF8);
+ if(!argv) return 1;
+ for(int i = 0; i < argc; i++) {
+  argv[i] = rk_utf8_from_wide(wide[i]);
+  if(!argv[i]) goto cleanup;
+ }
+ result = openrockcli_main(argc, argv);
+cleanup:
+ for(int i = 0; i < argc; i++) free(argv[i]);
+ free(argv);
+ return result;
+}
+#endif

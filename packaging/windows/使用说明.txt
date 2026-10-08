@@ -1,0 +1,27 @@
+OpenRockCLI Windows x64 原生 Rockusb 开发测试版
+
+1. 双击桌面上的 OpenRockCLI Native Preview 打开命令窗口。
+2. 保留厂家 rockusb.sys 驱动，不需要安装 WinUSB 或使用 Zadig 替换驱动。
+   本安装包只安装 OpenRockCLI，不包含 USB 驱动。
+3. 连接处于 Loader 或 Maskrom 模式的开发板，输入：
+   openrockcli scan
+4. 检查镜像（支持中文和带空格的路径）：
+   openrockcli inspect "C:\固件\update.img"
+5. 查看烧录参数或打开交互菜单：
+   openrockcli flash --help
+   openrockcli tui
+
+烧录会修改开发板存储。请先确认 scan 显示的 USB 位置就是目标设备。
+flash 默认读回校验；--noreset 表示完成后不重启。
+Windows 的 --bus 为 0，--port 必须使用 scan 输出的完整位置路径并加引号。
+
+本版本的编译、协议模拟、中文路径和镜像离线测试已通过；
+真实 Windows Rockusb 驱动与开发板烧录仍待实机验证。
+这是 OpenRockCLI 命令行工具，不是 LYNX 图形界面安装包。
+
+安装位置：当前用户的本地应用目录，或安装时指定的目录。
+桌面快捷方式打开的窗口内可以直接使用 openrockcli 命令。
+卸载：Windows 设置中的应用列表，或开始菜单中的 Uninstall。
+卸载只移除程序自身文件，保留放入安装目录的其他文件。
+
+更多实现与验证信息见 docs\WINDOWS_ROCKUSB.md。
