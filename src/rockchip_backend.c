@@ -3,16 +3,12 @@
 #include <rkgpt.h>
 #include <rockchip_usb_error.h>
 #include <stdarg.h>
-#include <sys/stat.h>
 
 #ifdef _WIN32
-#include <direct.h>
 #include <windows.h>
 #define rk_fseek _fseeki64
-#define rk_mkdir(path) _mkdir(path)
 #else
 #define rk_fseek fseeko
-#define rk_mkdir(path) mkdir(path, 0755)
 #endif
 
 static void backend_emit(rockchip_backend_event_cb cb, void * user,
@@ -50,105 +46,9 @@ static void backend_sleep_ms(unsigned int milliseconds)
 #endif
 }
 
-static void backend_close_device(struct openrockcli_ctx_t * ctx)
+int rockchip_backend_scan_devices(struct rockchip_device_info *devices, int max_devices)
 {
-	if(!ctx)
-		return;
-	if(ctx->hdl)
-	{
-		libusb_release_interface(ctx->hdl, 0);
-		libusb_close(ctx->hdl);
-		ctx->hdl = NULL;
-	}
-}
-
-static int backend_port_string(libusb_device * device, char * out, size_t out_size)
-{
-	uint8_t ports[8] = { 0 };
-	int count = libusb_get_port_numbers(device, ports, sizeof(ports));
-	int pos = 0;
-	if(!out || !out_size)
-		return 0;
-	out[0] = 0;
-	for(int i = 0; i < count && pos < (int)out_size - 1; i++)
-		pos += snprintf(out + pos, out_size - pos, "%s%u", i ? "." : "", ports[i]);
-	if(count <= 0)
-		snprintf(out, out_size, "-");
-	return count;
-}
-
-static int backend_is_adb(libusb_device * device)
-{
-	struct libusb_config_descriptor * config = NULL;
-	int adb = 0;
-	if(libusb_get_active_config_descriptor(device, &config) != 0)
-		return 0;
-	for(int i = 0; i < config->bNumInterfaces && !adb; i++)
-	{
-		const struct libusb_interface * iface = &config->interface[i];
-		for(int j = 0; j < iface->num_altsetting; j++)
-		{
-			const struct libusb_interface_descriptor * desc = &iface->altsetting[j];
-			if(desc->bInterfaceClass == 0xff && desc->bInterfaceSubClass == 0x42 &&
-				desc->bInterfaceProtocol == 0x01)
-			{
-				adb = 1;
-				break;
-			}
-		}
-	}
-	libusb_free_config_descriptor(config);
-	return adb;
-}
-
-int rockchip_backend_scan_devices(struct rockchip_device_info * devices, int max_devices)
-{
-	libusb_context * context = NULL;
-	libusb_device ** list = NULL;
-	ssize_t count;
-	int found = 0;
-	if(!devices || max_devices <= 0 || libusb_init(&context) != 0)
-		return 0;
-	count = libusb_get_device_list(context, &list);
-	if(count < 0)
-	{
-		libusb_exit(context);
-		return 0;
-	}
-	for(ssize_t i = 0; i < count && found < max_devices; i++)
-	{
-		struct libusb_device_descriptor desc;
-		struct rockchip_device_info * out;
-		if(libusb_get_device_descriptor(list[i], &desc) != 0 || desc.idVendor != 0x2207 ||
-			backend_is_adb(list[i]))
-			continue;
-		out = &devices[found++];
-		memset(out, 0, sizeof(*out));
-		out->bus = libusb_get_bus_number(list[i]);
-		out->vid = desc.idVendor;
-		out->pid = desc.idProduct;
-		backend_port_string(list[i], out->port, sizeof(out->port));
-		snprintf(out->mode, sizeof(out->mode), "%s",
-			(desc.bcdUSB & 1) ? "loader" : "maskrom");
-		if(!strcmp(out->mode, "maskrom") && desc.iProduct)
-		{
-			libusb_device_handle * handle = NULL;
-			unsigned char product[128] = { 0 };
-			if(libusb_open(list[i], &handle) == 0)
-			{
-				if(libusb_get_string_descriptor_ascii(handle, desc.iProduct, product,
-					sizeof(product) - 1) > 0 &&
-					(strstr((char *)product, "USB-MSC") || strstr((char *)product, "Loader") ||
-					 strstr((char *)product, "download")))
-					snprintf(out->mode, sizeof(out->mode), "loader");
-				libusb_close(handle);
-			}
-		}
-		snprintf(out->chip, sizeof(out->chip), "%s", openrockcli_chip_name(desc.idProduct));
-	}
-	libusb_free_device_list(list, 1);
-	libusb_exit(context);
-	return found;
+ return rk_usb_scan(devices, max_devices);
 }
 
 int rockchip_backend_scan(int detailed, int verbose)
@@ -159,15 +59,18 @@ int rockchip_backend_scan(int detailed, int verbose)
 	(void)verbose;
 	printf("Scanning USB devices...\r\n\r\n");
 	count = rockchip_backend_scan_devices(devices, ARRAY_SIZE(devices));
-	if(!count)
+	if(count <= 0)
 	{
-		printf("Error: Device not found\r\n");
-		return 0;
+		if(count < 0)
+			printf("Error: scan failed (%s)\r\n", rk_usb_error_name(count));
+		else
+			printf("No Rockchip device found.\r\n");
+		return count;
 	}
 	printf("Bus  Port  VID:PID    Mode      Chip\r\n");
 	printf("---  ----  ---------  --------  --------\r\n");
 	for(int i = 0; i < count; i++)
-		printf("%03u  %-4.4s  %04x:%04x  %-8s  %s\r\n", devices[i].bus,
+		printf("%03u  %-4s  %04x:%04x  %-8s  %s\r\n", devices[i].bus,
 			devices[i].port, devices[i].vid, devices[i].pid, devices[i].mode, devices[i].chip);
 	return count;
 }
@@ -266,20 +169,38 @@ int rockchip_backend_inspect_firmware(const char * firmware)
 
 static int backend_safe_filename(const char * file)
 {
-	return file && file[0] && !strstr(file, "..") && !strchr(file, '/') && !strchr(file, '\\');
+	if(!file || !file[0] || strstr(file, "..") || strpbrk(file, "<>:\"/\\|?*")) return 0;
+	size_t n = strlen(file);
+	if(file[n - 1] == '.' || file[n - 1] == ' ') return 0;
+	for(const unsigned char *p = (const unsigned char *)file; *p; p++) if(*p < 32) return 0;
+	char stem[5] = {0};
+	for(size_t i = 0; i < 4 && file[i] && file[i] != '.'; i++) stem[i] = toupper((unsigned char)file[i]);
+	if(!strcmp(stem, "CON") || !strcmp(stem, "PRN") || !strcmp(stem, "AUX") || !strcmp(stem, "NUL")) return 0;
+	if((!strncmp(stem,"COM",3) || !strncmp(stem,"LPT",3)) && stem[3] >= '1' && stem[3] <= '9' && (!file[4] || file[4] == '.')) return 0;
+	return 1;
 }
 
 int rockchip_backend_unpack_firmware(const char * firmware, const char * outdir)
 {
 	struct rkimage image;
 	char error[192] = { 0 };
-	struct stat st;
 	if(!outdir || !outdir[0] || !rkimage_open(firmware, &image, error, sizeof(error)))
 	{
 		printf("Error: %s\r\n", error[0] ? error : "output directory not specified");
 		return 0;
 	}
-	if(stat(outdir, &st) != 0 && rk_mkdir(outdir) != 0)
+	for(int i = 0; i < image.item_count; i++)
+	{
+		if(!backend_safe_filename(image.items[i].file) || strlen(outdir) + strlen(image.items[i].file) + 2 > 1024) {
+			printf("Error: unsafe or overlong output filename: %s\r\n", image.items[i].file);
+			return 0;
+		}
+		for(int j = 0; j < i; j++)
+			if(!strcasecmp(image.items[i].file, image.items[j].file)) {
+				printf("Error: duplicate output filename\r\n"); return 0;
+			}
+	}
+	if(rk_make_directory(outdir) != 0)
 	{
 		printf("Error: cannot create output directory '%s': %s\r\n", outdir, strerror(errno));
 		return 0;
@@ -294,8 +215,10 @@ int rockchip_backend_unpack_firmware(const char * firmware, const char * outdir)
 		}
 		snprintf(path, sizeof(path), "%s/%s", outdir, image.items[i].file);
 		printf("Extracting %s\r\n", image.items[i].file);
-		if(!rkimage_extract(&image, &image.items[i], path))
+		if(!rkimage_extract(&image, &image.items[i], path)) {
+			printf("Error: extraction failed (existing output files are not overwritten): %s\r\n", path);
 			return 0;
+		}
 	}
 	return 1;
 }
@@ -321,33 +244,14 @@ static int backend_selected(const char * csv, const char * name)
 	return 0;
 }
 
-static int backend_open_device(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port)
+static int backend_open_device(struct openrockcli_ctx_t *ctx, uint8_t bus, const char *port)
 {
-	int rc;
-	memset(ctx, 0, sizeof(*ctx));
-	rc = libusb_init(&ctx->context);
-	if(rc != 0)
-	{
-		ctx->last_usb_error = rc;
-		return 0;
-	}
-	if(!openrockcli_init_selected(ctx, bus, port))
-	{
-		libusb_exit(ctx->context);
-		ctx->context = NULL;
-		return 0;
-	}
-	return 1;
+ memset(ctx, 0, sizeof(*ctx));
+ return openrockcli_init_selected(ctx, bus, port);
 }
-
-static void backend_destroy_device(struct openrockcli_ctx_t * ctx)
+static void backend_destroy_device(struct openrockcli_ctx_t *ctx)
 {
-	backend_close_device(ctx);
-	if(ctx && ctx->context)
-	{
-		libusb_exit(ctx->context);
-		ctx->context = NULL;
-	}
+ rk_usb_close(ctx);
 }
 
 static int backend_download_loader(struct openrockcli_ctx_t * ctx, const struct rkimage * image,
@@ -357,7 +261,7 @@ static int backend_download_loader(struct openrockcli_ctx_t * ctx, const struct 
 	void * data;
 	struct rkloader_ctx_t * lctx;
 	int downloaded = 0;
-	data = malloc((size_t)loader->size);
+	data = loader->size <= 64U * 1024 * 1024 ? malloc((size_t)loader->size) : NULL;
 	if(!data || !rkimage_read(image, loader->data_offset, data, (size_t)loader->size))
 	{
 		free(data);
@@ -382,8 +286,13 @@ static int backend_download_loader(struct openrockcli_ctx_t * ctx, const struct 
 			uint32_t size = get_unaligned_le32(&entry->data_size);
 			uint32_t delay = get_unaligned_le32(&entry->data_delay);
 			backend_report(cb, user, "Downloading %s", loader_wide2str(name, (uint8_t *)entry->name, sizeof(entry->name)));
-			rock_maskrom_upload_memory(ctx, entry->type == RKLOADER_ENTRY_471 ? 0x471 : 0x472,
-				payload, size, lctx->is_rc4on);
+			if(!rock_maskrom_upload_memory(ctx, entry->type == RKLOADER_ENTRY_471 ? 0x471 : 0x472,
+				payload, size, lctx->is_rc4on))
+			{
+				backend_report(cb, user, "Error: Loader transfer failed (%s)", rk_usb_error_name(ctx->last_usb_error));
+				rkloader_ctx_free(lctx);
+				return 0;
+			}
 			backend_sleep_ms(delay ? delay : 10);
 			downloaded++;
 		}
@@ -398,7 +307,9 @@ static int backend_download_loader(struct openrockcli_ctx_t * ctx, const struct 
 		backend_sleep_ms(250);
 		if(backend_open_device(ctx, bus, port))
 		{
-			if(!ctx->maskrom || rock_ready(ctx))
+			/* The original Maskrom may remain present during re-enumeration.
+			 * No bulk endpoints means no ready command can be sent yet. */
+			if(rk_usb_has_bulk(ctx) && (!ctx->maskrom || rock_ready(ctx)))
 			{
 				ctx->maskrom = 0;
 				return 1;
@@ -429,16 +340,54 @@ static void backend_progress_update(struct backend_progress * progress, uint64_t
 	}
 }
 
+enum backend_verify_method { VERIFY_NONE, VERIFY_HOST_READBACK, VERIFY_DEVICE_CHECKSUM };
+
+static int backend_select_verification(struct openrockcli_ctx_t *ctx, int requested,
+	rockchip_backend_event_cb cb, void *user)
+{
+	uint8_t capabilities[8] = {0};
+	int method;
+	if(!requested) return VERIFY_NONE;
+	if(!rock_capability(ctx, capabilities))
+	{
+		backend_report(cb, user, "Error: ROCKCHIP_VERIFY_UNAVAILABLE before erase: Loader capability query failed usb_error=%d", ctx->last_usb_error);
+		return -1;
+	}
+	backend_report(cb, user, "Loader capabilities: %02x %02x %02x %02x %02x %02x %02x %02x",
+		capabilities[0], capabilities[1], capabilities[2], capabilities[3],
+		capabilities[4], capabilities[5], capabilities[6], capabilities[7]);
+	if(capabilities[0] & (1 << 3)) method = VERIFY_HOST_READBACK;
+	else if(capabilities[1] & (1 << 2)) method = VERIFY_DEVICE_CHECKSUM;
+	else
+	{
+		backend_report(cb, user, "Error: ROCKCHIP_VERIFY_UNAVAILABLE before erase: Loader advertises neither full READ_LBA nor LBAwrite Parity; no erase or flash write issued");
+		return -1;
+	}
+	backend_report(cb, user, "Verification method: %s", method == VERIFY_HOST_READBACK ? "host-readback" : "device-checksum");
+	if(method == VERIFY_DEVICE_CHECKSUM)
+		backend_report(cb, user, "Device-checksum verification: Loader reads media after each write and checks the Rockchip 32-bit additive checksum; not a host byte-for-byte comparison.");
+	return method;
+}
+
+static int backend_write_lba(struct openrockcli_ctx_t *ctx, uint32_t lba, uint32_t sectors,
+	void *data, int method, const char *name, rockchip_backend_event_cb cb, void *user)
+{
+	if(method != VERIFY_DEVICE_CHECKSUM) return rock_flash_write_lba(ctx, lba, sectors, data);
+	if(rock_flash_write_lba_parity(ctx, lba, sectors, data)) return 1;
+	backend_report(cb, user, "Error: ROCKCHIP_VERIFY_FAILED %s method=device-checksum lba=0x%x sectors=%u usb_error=%d; write/checksum command was not confirmed, no retry", name, lba, sectors, ctx->last_usb_error);
+	return 0;
+}
+
 static int backend_write_item(struct openrockcli_ctx_t * ctx, const struct rkimage * image,
-	const struct rkimage_item * item, uint32_t lba, int * verify,
+	const struct rkimage_item * item, uint32_t lba, int verify,
 	struct backend_progress * progress, rockchip_backend_event_cb cb, void * user)
 {
-	FILE * fp = fopen(image->path, "rb");
+	FILE * fp = rk_fopen(image->path, "rb");
 	uint8_t * write_buffer = malloc(128 * 512);
-	uint8_t * read_buffer = *verify ? malloc(128 * 512) : NULL;
+	uint8_t * read_buffer = verify == VERIFY_HOST_READBACK ? malloc(128 * 512) : NULL;
 	uint64_t remaining = item->size;
 	int ok = 0;
-	if(!fp || !write_buffer || (*verify && !read_buffer) ||
+	if(!fp || !write_buffer || (verify == VERIFY_HOST_READBACK && !read_buffer) ||
 		rk_fseek(fp, (int64_t)item->data_offset, SEEK_SET) != 0)
 		goto cleanup;
 	while(remaining)
@@ -447,24 +396,16 @@ static int backend_write_item(struct openrockcli_ctx_t * ctx, const struct rkima
 		uint32_t sectors = (uint32_t)((bytes + 511) / 512);
 		memset(write_buffer, 0, sectors * 512);
 		if(fread(write_buffer, 1, bytes, fp) != bytes ||
-			!rock_flash_write_lba(ctx, lba, sectors, write_buffer))
+			!backend_write_lba(ctx, lba, sectors, write_buffer, verify, item->name, cb, user))
 			goto cleanup;
-		if(*verify)
+		if(verify == VERIFY_HOST_READBACK)
 		{
-			int unavailable = lba >= 0x10000;
 			memset(read_buffer, 0, sectors * 512);
-			if(!rock_flash_read_lba(ctx, lba, sectors, read_buffer))
-				goto cleanup;
-			if(memcmp(write_buffer, read_buffer, sectors * 512))
+			if(!rock_flash_read_lba(ctx, lba, sectors, read_buffer) ||
+				memcmp(write_buffer, read_buffer, sectors * 512))
 			{
-				for(size_t index = 0; unavailable && index < sectors * 512; index++)
-					if(read_buffer[index] != 0xcc)
-						unavailable = 0;
-				if(!unavailable)
-					goto cleanup;
-				backend_report(cb, user,
-					"Warning: target Loader blocks reads above 32 MiB; high-address read-back verification is unavailable.");
-				*verify = 0;
+				backend_report(cb, user, "Error: ROCKCHIP_VERIFY_FAILED at LBA 0x%x; verification cannot be downgraded", lba);
+				goto cleanup;
 			}
 		}
 		lba += sectors;
@@ -485,7 +426,7 @@ static int backend_write_boot(struct openrockcli_ctx_t * ctx, const struct rkima
 	const struct rkimage_item * loader, int verify, struct backend_progress * progress,
 	rockchip_backend_event_cb cb, void * user)
 {
-	void * data = malloc((size_t)loader->size);
+	void * data = loader->size <= 64U * 1024 * 1024 ? malloc((size_t)loader->size) : NULL;
 	struct rkloader_ctx_t * lctx;
 	enum storage_type_t storage;
 	uint32_t boot_lba = 64;
@@ -504,11 +445,13 @@ static int backend_write_boot(struct openrockcli_ctx_t * ctx, const struct rkima
 	if(!lctx || !lctx->idbbuf || !lctx->idblen)
 		goto cleanup;
 	storage = rock_storage_read(ctx);
+	if(ctx->last_usb_error || storage == STORAGE_TYPE_UNKNOWN) goto cleanup;
 	if(storage == STORAGE_TYPE_SPINOR)
 		boot_lba = 128;
 	else if(storage == STORAGE_TYPE_SPINAND)
 	{
 		/* RK3506 SPI NAND uses two complete 256 KiB IDB slots at physical blocks 1 and 3. */
+		if(lctx->idblen > 256U * 1024) goto cleanup;
 		boot_lba = 256;
 		boot_stride = 512;
 		boot_copies = 2;
@@ -531,15 +474,16 @@ static int backend_write_boot(struct openrockcli_ctx_t * ctx, const struct rkima
 		uint32_t target = boot_lba + copy * boot_stride;
 		backend_report(cb, user, "Writing bootloader IDB copy %d/%d at LBA 0x%x",
 			copy + 1, boot_copies, target);
-		if(!rock_flash_write_lba(ctx, target, boot_sectors, boot_data))
+		if(!backend_write_lba(ctx, target, boot_sectors, boot_data, verify, "bootloader", cb, user))
 			goto cleanup;
-		if(verify)
+		if(verify == VERIFY_HOST_READBACK)
 		{
 			void * check = calloc(1, (size_t)boot_sectors * 512);
 			if(!check || !rock_flash_read_lba(ctx, target,
 				boot_sectors, check) ||
 				memcmp(check, boot_data, (size_t)boot_sectors * 512))
 			{
+				backend_report(cb, user, "Error: ROCKCHIP_VERIFY_FAILED bootloader at LBA 0x%x", target);
 				free(check);
 				goto cleanup;
 			}
@@ -562,6 +506,72 @@ cleanup:
 	return ok;
 }
 
+static int backend_all_cc(const uint8_t *data, size_t size)
+{
+	for(size_t i = 0; i < size; i++) if(data[i] != 0xcc) return 0;
+	return size > 0;
+}
+
+static int backend_verify_gpt(struct openrockcli_ctx_t *ctx, const char *name,
+	uint32_t lba, uint32_t sectors, const uint8_t *expected, uint8_t *check,
+	rockchip_backend_event_cb cb, void *user)
+{
+	size_t size = (size_t)sectors * RKGPT_SECTOR_SIZE, difference = 0;
+	if(!rock_flash_read_lba(ctx, lba, sectors, check))
+	{
+		backend_report(cb, user, "Error: ROCKCHIP_VERIFY_FAILED %s GPT reason=read-failed lba=0x%x sectors=%u usb_error=%d (%s)",
+			name, lba, sectors, ctx->last_usb_error, rk_usb_error_name(ctx->last_usb_error));
+		return 0;
+	}
+	while(difference < size && check[difference] == expected[difference]) difference++;
+	if(difference == size) return 1;
+	backend_report(cb, user, "Error: ROCKCHIP_VERIFY_FAILED %s GPT reason=%s lba=0x%x sectors=%u first_difference=%zu expected=%02x actual=%02x",
+		name, backend_all_cc(check, size) ? "all-0xcc" : "data-mismatch", lba, sectors,
+		difference, expected[difference], check[difference]);
+	return 0;
+}
+
+/* A read that returns only Rockchip's known 0xcc placeholder cannot establish
+ * readability. It can also be real data: report uncertainty, never success or
+ * a proven firmware restriction. This check makes no persistent changes. */
+static int backend_probe_readback(struct openrockcli_ctx_t *ctx, const char *name,
+	uint32_t lba, uint32_t sectors, rockchip_backend_event_cb cb, void *user)
+{
+	uint8_t check[RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE];
+	int read_ok = rock_flash_read_lba(ctx, lba, sectors, check);
+	if(read_ok && !backend_all_cc(check, (size_t)sectors * RKGPT_SECTOR_SIZE)) return 1;
+	backend_report(cb, user, "Error: ROCKCHIP_VERIFY_UNAVAILABLE before erase: %s reason=%s lba=0x%x sectors=%u usb_error=%d; cannot establish readback capability; no erase or flash write issued",
+		name, read_ok ? "all-0xcc" : "read-failed", lba, sectors, ctx->last_usb_error);
+	return 0;
+}
+
+static int backend_readback_preflight(struct openrockcli_ctx_t *ctx,
+	const struct rockchip_flash_request *request, const struct rkimage *image,
+	const struct rkimage_item *parameter, uint32_t sectors,
+	rockchip_backend_event_cb cb, void *user)
+{
+	if(!request->verify) return 1;
+	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Checking Readback", -1);
+	if(parameter && backend_selected(request->partitions, parameter->name))
+	{
+		if(!backend_probe_readback(ctx, "primary GPT", 0, RKGPT_MASTER_SECTORS, cb, user) ||
+			!backend_probe_readback(ctx, "backup GPT", sectors - RKGPT_BACKUP_SECTORS,
+				RKGPT_BACKUP_SECTORS, cb, user)) return 0;
+	}
+	for(int i = 0; i < image->item_count; i++)
+	{
+		const struct rkimage_item *item = &image->items[i];
+		uint32_t count = (uint32_t)((item->size + 511) / 512);
+		if(!count || !backend_selected(request->partitions, item->name) ||
+			!strcmp(item->name, "package-file") || !strcmp(item->name, "bootloader") ||
+			!strcmp(item->name, "parameter")) continue;
+		if(!backend_probe_readback(ctx, item->name, item->flash_offset, 1, cb, user)) return 0;
+		if(count > 1 && !backend_probe_readback(ctx, item->name,
+			item->flash_offset + count - 1, 1, cb, user)) return 0;
+	}
+	return 1;
+}
+
 static int backend_write_gpt(struct openrockcli_ctx_t * ctx, const struct rkimage * image,
 	const struct rkimage_item * parameter, uint32_t disk_sectors, int verify,
 	struct backend_progress * progress, rockchip_backend_event_cb cb, void * user)
@@ -569,10 +579,10 @@ static int backend_write_gpt(struct openrockcli_ctx_t * ctx, const struct rkimag
 	uint8_t * parameter_data = malloc((size_t)parameter->size);
 	uint8_t * master = malloc(RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE);
 	uint8_t * backup = malloc(RKGPT_BACKUP_SECTORS * RKGPT_SECTOR_SIZE);
-	uint8_t * check = verify ? malloc(RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE) : NULL;
+	uint8_t * check = verify == VERIFY_HOST_READBACK ? malloc(RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE) : NULL;
 	char error[192] = { 0 };
 	int ok = 0;
-	if(!parameter_data || !master || !backup || (verify && !check) ||
+	if(!parameter_data || !master || !backup || (verify == VERIFY_HOST_READBACK && !check) ||
 		!rkimage_read(image, parameter->data_offset, parameter_data, (size_t)parameter->size))
 		goto cleanup;
 	if(!rkgpt_build(parameter_data, (size_t)parameter->size, disk_sectors,
@@ -582,29 +592,15 @@ static int backend_write_gpt(struct openrockcli_ctx_t * ctx, const struct rkimag
 		goto cleanup;
 	}
 	backend_report(cb, user, "Writing primary and backup GPT");
-	if(!rock_flash_write_lba(ctx, 0, RKGPT_MASTER_SECTORS, master) ||
-		!rock_flash_write_lba(ctx, disk_sectors - RKGPT_BACKUP_SECTORS,
-			RKGPT_BACKUP_SECTORS, backup))
+	if(!backend_write_lba(ctx, 0, RKGPT_MASTER_SECTORS, master, verify, "primary GPT", cb, user) ||
+		!backend_write_lba(ctx, disk_sectors - RKGPT_BACKUP_SECTORS,
+			RKGPT_BACKUP_SECTORS, backup, verify, "backup GPT", cb, user))
 		goto cleanup;
-	if(verify)
+	if(verify == VERIFY_HOST_READBACK)
 	{
-		int unavailable = 1;
-		if(!rock_flash_read_lba(ctx, 0, RKGPT_MASTER_SECTORS, check) ||
-			memcmp(check, master, RKGPT_MASTER_SECTORS * RKGPT_SECTOR_SIZE))
-			goto cleanup;
-		if(!rock_flash_read_lba(ctx, disk_sectors - RKGPT_BACKUP_SECTORS,
-			RKGPT_BACKUP_SECTORS, check))
-			goto cleanup;
-		if(memcmp(check, backup, RKGPT_BACKUP_SECTORS * RKGPT_SECTOR_SIZE))
-		{
-			for(size_t i = 0; i < RKGPT_BACKUP_SECTORS * RKGPT_SECTOR_SIZE; i++)
-				if(check[i] != 0xcc)
-					unavailable = 0;
-			if(!unavailable)
-				goto cleanup;
-			backend_report(cb, user,
-				"Warning: target Loader cannot read the backup GPT address; primary GPT verification passed.");
-		}
+		if(!backend_verify_gpt(ctx, "primary", 0, RKGPT_MASTER_SECTORS, master, check, cb, user) ||
+			!backend_verify_gpt(ctx, "backup", disk_sectors - RKGPT_BACKUP_SECTORS,
+				RKGPT_BACKUP_SECTORS, backup, check, cb, user)) goto cleanup;
 	}
 	backend_progress_update(progress, parameter->size, cb, user);
 	ok = 1;
@@ -621,6 +617,60 @@ static int backend_mode_valid(const char * mode)
 {
 	return !mode || !strcmp(mode, "partition") || !strcmp(mode, "keep_data") ||
 		!strcmp(mode, "partition_erase") || !strcmp(mode, "full_erase");
+}
+
+/* Complete all image/layout checks before the first destructive command. */
+static int backend_preflight(const struct rockchip_flash_request *request,
+ const struct rkimage *image, const struct rkimage_item *loader,
+ const struct rkimage_item *parameter, uint32_t sectors, enum storage_type_t storage,
+ rockchip_backend_event_cb cb, void *user)
+{
+ int selected = 0;
+ uint64_t boot_start = storage == STORAGE_TYPE_SPINAND ? 0 : storage == STORAGE_TYPE_SPINOR ? 128 : 64;
+ uint64_t boot_end = 0;
+ if(!sectors) { backend_report(cb, user, "Error: target reports zero sectors"); return 0; }
+ if(backend_selected(request->partitions, loader->name)) {
+  void *data = loader->size <= 64U * 1024 * 1024 ? malloc((size_t)loader->size) : NULL;
+  struct rkloader_ctx_t *lctx = NULL;
+  if(data && rkimage_read(image, loader->data_offset, data, (size_t)loader->size)) lctx = rkloader_ctx_alloc_data(data, loader->size);
+  free(data);
+  int valid = lctx && lctx->idbbuf && lctx->idblen &&
+   (storage != STORAGE_TYPE_SPINAND || lctx->idblen <= 256U * 1024);
+  if(valid) boot_end = storage == STORAGE_TYPE_SPINAND ? 2048 : boot_start + (lctx->idblen + 511) / 512;
+  rkloader_ctx_free(lctx);
+  if(!valid || boot_end > sectors) { backend_report(cb, user, "Error: invalid or oversized embedded bootloader"); return 0; }
+ }
+ if(parameter && backend_selected(request->partitions, parameter->name)) {
+  void *data = parameter->size <= 1024U * 1024 ? malloc((size_t)parameter->size) : NULL;
+  uint8_t master[RKGPT_MASTER_SECTORS * 512], backup[RKGPT_BACKUP_SECTORS * 512];
+  char error[192] = {0};
+  int valid = data && rkimage_read(image, parameter->data_offset, data, (size_t)parameter->size) &&
+   rkgpt_build(data, parameter->size, sectors, master, backup, error, sizeof(error));
+  free(data);
+  if(!valid) { backend_report(cb, user, "Error: invalid GPT before erase: %s", error); return 0; }
+ }
+ for(int i = 0; i < image->item_count; i++) {
+  const struct rkimage_item *item = &image->items[i];
+  if(!backend_selected(request->partitions, item->name) || !strcmp(item->name, "package-file")) continue;
+  selected++;
+  if(!strcmp(item->name, "bootloader") || !strcmp(item->name, "parameter")) continue;
+  uint64_t needed = (item->size + 511) / 512, end = (uint64_t)item->flash_offset + needed;
+  if(!needed || item->flash_offset == UINT32_MAX || needed > item->flash_sectors || end > sectors ||
+   (request->mode && !strcmp(request->mode, "partition_erase") && (uint64_t)item->flash_offset + item->flash_sectors > sectors) ||
+   (boot_end && item->flash_offset < boot_end && end > boot_start) ||
+   (parameter && backend_selected(request->partitions, parameter->name) &&
+    (item->flash_offset < RKGPT_MASTER_SECTORS || end > sectors - RKGPT_BACKUP_SECTORS))) {
+   backend_report(cb, user, "Error: invalid target range for partition %s before erase", item->name); return 0;
+  }
+  for(int j = 0; j < i; j++) {
+   const struct rkimage_item *other = &image->items[j];
+   if(!backend_selected(request->partitions, other->name) || !strcmp(other->name,"package-file") || !strcmp(other->name,"bootloader") || !strcmp(other->name,"parameter")) continue;
+   uint64_t other_end = (uint64_t)other->flash_offset + (other->size + 511) / 512;
+   if(item->flash_offset < other_end && end > other->flash_offset) { backend_report(cb,user,"Error: overlapping partitions before erase"); return 0; }
+  }
+ }
+ if(!selected) { backend_report(cb,user,"Error: no requested partitions exist in image"); return 0; }
+ return 1;
 }
 
 struct rockchip_backend_cli_state { char stage[96]; };
@@ -652,6 +702,8 @@ static void backend_cli_event(const struct rockchip_backend_event * event, void 
 	}
 	else if(event->text)
 		printf("%s\r\n", event->text);
+	/* LYNX captures a pipe: stage/error lines must arrive before a long I/O. */
+	fflush(stdout);
 }
 
 int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request,
@@ -670,7 +722,9 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 	uint8_t bus = 0;
 	const char * port = NULL;
 	int device_count;
+	int selected;
 	int verify_active;
+	enum storage_type_t storage;
 	int ok = 0;
 	if(!request || !rkimage_open(request->firmware, &image, error, sizeof(error)))
 	{
@@ -684,31 +738,21 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 		backend_report(cb, user, "Error: unsupported flash mode '%s'", mode);
 		return 0;
 	}
-	if(strcmp(post_action, "reboot") && strcmp(post_action, "poweroff") && strcmp(post_action, "shutdown"))
+	if(strcmp(post_action, "reboot") && strcmp(post_action, "poweroff") && strcmp(post_action, "shutdown") && strcmp(post_action, "none"))
 	{
 		backend_report(cb, user, "Error: unsupported post action '%s'", post_action);
 		return 0;
 	}
 	device_count = rockchip_backend_scan_devices(devices, ARRAY_SIZE(devices));
-	if(!device_count)
+	selected = device_count < 0 ? device_count :
+		rk_usb_select(devices, device_count, request->bus, request->port);
+	if(selected < 0)
 	{
-		backend_report(cb, user, "Error: Device not found");
+		backend_report(cb, user, "Error: device selection failed (%s); use the exact --bus and --port from scan", rk_usb_error_name(selected));
 		return 0;
 	}
-	if(device_count > 1 && !request->bus && !request->port)
-	{
-		backend_report(cb, user, "Error: multiple Rockchip devices detected; specify --bus and --port");
-		return 0;
-	}
-	if(request->bus)
-		bus = (uint8_t)strtoul(request->bus, NULL, 0);
-	if(request->port)
-		port = request->port;
-	else if(device_count == 1)
-	{
-		bus = devices[0].bus;
-		port = devices[0].port;
-	}
+	bus = devices[selected].bus;
+	port = devices[selected].port;
 	loader = rkimage_find_item(&image, "bootloader");
 	parameter = rkimage_find_item(&image, "parameter");
 	if(!loader)
@@ -732,7 +776,7 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 	{
 		backend_report(cb, user, "Error: %s (%s): %s",
 			rockchip_usb_open_error_code(ctx.last_usb_error),
-			libusb_error_name(ctx.last_usb_error),
+			rk_usb_error_name(ctx.last_usb_error),
 			rockchip_usb_open_recovery(ctx.last_usb_error));
 		return 0;
 	}
@@ -741,7 +785,13 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 	/* RK3506 loaders may report SPI NAND as the current medium before its
 	 * translation layer is selected.  Explicitly switch it, matching the
 	 * vendor Rockusb sequence, before detecting capacity or touching LBAs. */
-	if(rock_storage_read(&ctx) == STORAGE_TYPE_SPINAND)
+	storage = rock_storage_read(&ctx);
+	if(ctx.last_usb_error || storage == STORAGE_TYPE_UNKNOWN)
+	{
+		backend_report(cb, user, "Error: cannot read target storage (%s); stopping before erase", rk_usb_error_name(ctx.last_usb_error));
+		goto cleanup;
+	}
+	if(storage == STORAGE_TYPE_SPINAND)
 	{
 		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Selecting SPI NAND", -1);
 		if(!rock_storage_switch(&ctx, STORAGE_TYPE_SPINAND) || !rock_ready(&ctx))
@@ -755,6 +805,10 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 		backend_report(cb, user, "Error: cannot detect target flash");
 		goto cleanup;
 	}
+	if(!backend_preflight(request, &image, loader, parameter, flash_info.sector_total, storage, cb, user)) goto cleanup;
+	verify_active = backend_select_verification(&ctx, request->verify, cb, user);
+	if(verify_active < 0) goto cleanup;
+	if(verify_active == VERIFY_HOST_READBACK && !backend_readback_preflight(&ctx, request, &image, parameter, flash_info.sector_total, cb, user)) goto cleanup;
 	backend_report(cb, user, "Target flash: %u sectors (%.1f GiB)", flash_info.sector_total,
 		(double)flash_info.sector_total / 2097152.0);
 	if(!strcmp(mode, "full_erase"))
@@ -767,18 +821,17 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 		}
 	}
 	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Flashing Partitions", -1);
-	verify_active = request->verify;
 	/* IDB must precede GPT on SPI NAND: preparing the IDB reserve erases the
 	 * first MiB, which contains the primary GPT. */
 	if(backend_selected(request->partitions, loader->name) &&
-		!backend_write_boot(&ctx, &image, loader, request->verify, &progress, cb, user))
+		!backend_write_boot(&ctx, &image, loader, verify_active, &progress, cb, user))
 	{
 		backend_report(cb, user, "Error: bootloader write or verification failed");
 		goto cleanup;
 	}
 	if(parameter && backend_selected(request->partitions, parameter->name) &&
 		!backend_write_gpt(&ctx, &image, parameter, flash_info.sector_total,
-			request->verify, &progress, cb, user))
+			verify_active, &progress, cb, user))
 	{
 		backend_report(cb, user, "Error: GPT write or verification failed");
 		goto cleanup;
@@ -804,7 +857,7 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 		}
 		backend_report(cb, user, "Writing %-12s LBA 0x%x, %llu bytes", item->name, lba,
 			(unsigned long long)item->size);
-		if(!backend_write_item(&ctx, &image, item, lba, &verify_active, &progress, cb, user))
+		if(!backend_write_item(&ctx, &image, item, lba, verify_active, &progress, cb, user))
 		{
 			backend_report(cb, user, "Error: write or verification failed for partition %s", item->name);
 			goto cleanup;
@@ -814,11 +867,22 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 	{
 		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Setting Mode", 100);
 		if(!rock_reset(&ctx, 0))
-			backend_report(cb, user, "Warning: reset command was not acknowledged");
+		{
+			backend_report(cb, user, "Error: reset command was not acknowledged");
+			goto cleanup;
+		}
 	}
+	else if(!strcmp(post_action, "none"))
+		backend_report(cb, user, "Reset skipped; leaving the device in Loader mode.");
 	else
-		backend_report(cb, user, "Poweroff is not a Rockusb command; leaving the device in Loader mode.");
-	backend_report(cb, user, "Flash complete! Device will %s.", post_action);
+	{
+		backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Setting Mode", 100);
+		if(!rock_poweroff(&ctx)) {
+			backend_report(cb, user, "Error: poweroff command was not acknowledged");
+			goto cleanup;
+		}
+	}
+	backend_report(cb, user, "Flash complete! Verification: %s. Post action: %s.", request->verify ? "passed" : "not requested", post_action);
 	ok = 1;
 
 cleanup:

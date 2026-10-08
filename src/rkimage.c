@@ -49,7 +49,7 @@ int rkimage_read(const struct rkimage * image, uint64_t offset, void * data, siz
 	int ok;
 	if(!image || !data || !rkimage_range_valid(offset, size, image->file_size))
 		return 0;
-	fp = fopen(image->path, "rb");
+	fp = rk_fopen(image->path, "rb");
 	if(!fp)
 		return 0;
 	ok = rk_fseek(fp, (int64_t)offset, SEEK_SET) == 0 && fread(data, 1, size, fp) == size;
@@ -59,7 +59,6 @@ int rkimage_read(const struct rkimage * image, uint64_t offset, void * data, siz
 
 int rkimage_open(const char * path, struct rkimage * image, char * error, size_t error_size)
 {
-	struct stat st;
 	uint8_t outer[RKFW_HEADER_SIZE];
 	uint8_t inner[RKAF_HEADER_SIZE];
 	FILE * fp = NULL;
@@ -69,19 +68,19 @@ int rkimage_open(const char * path, struct rkimage * image, char * error, size_t
 	if(!path || !image)
 		return 0;
 	memset(image, 0, sizeof(*image));
-	if(stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+	if(rk_file_size(path, &image->file_size) != 0)
 	{
 		rkimage_error(error, error_size, "firmware file not found: %s", path);
 		return 0;
 	}
-	image->file_size = (uint64_t)st.st_size;
+	if(strlen(path) >= sizeof(image->path)) { rkimage_error(error, error_size, "firmware path too long"); return 0; }
 	snprintf(image->path, sizeof(image->path), "%s", path);
 	if(image->file_size < sizeof(outer) + sizeof(inner))
 	{
 		rkimage_error(error, error_size, "firmware is too small");
 		return 0;
 	}
-	fp = fopen(path, "rb");
+	fp = rk_fopen(path, "rb");
 	if(!fp || fread(outer, 1, sizeof(outer), fp) != sizeof(outer))
 	{
 		rkimage_error(error, error_size, "cannot read RKFW header");
@@ -148,14 +147,18 @@ int rkimage_open(const char * path, struct rkimage * image, char * error, size_t
 		item->data_offset = image->firmware_offset + relative;
 		item->flash_offset = get_unaligned_le32(raw + 100);
 		/* RKAF stores the payload allocation in 2 KiB blocks; Rockusb uses 512-byte LBAs. */
-		item->flash_sectors = get_unaligned_le32(raw + 104) * 4U;
+		uint32_t blocks = get_unaligned_le32(raw + 104);
+		if(blocks > UINT32_MAX / 4U) { rkimage_error(error, error_size, "RKAF allocation overflows LBA count"); goto fail; }
+		item->flash_sectors = blocks * 4U;
 		item->size = get_unaligned_le32(raw + 108);
-		if(!item->name[0] || !item->file[0] || item->data_offset > package_end ||
+		if(!item->name[0] || !item->file[0] || relative < RKAF_HEADER_SIZE + (uint64_t)item_count * RKAF_ITEM_SIZE || item->data_offset > package_end ||
 			item->size > package_end - item->data_offset)
 		{
 			rkimage_error(error, error_size, "invalid RKAF item %u", i);
 			goto fail;
 		}
+		for(uint32_t j = 0; j < i; j++)
+			if(!strcmp(item->name, image->items[j].name)) { rkimage_error(error, error_size, "duplicate RKAF partition name"); goto fail; }
 	}
 	image->item_count = (int)item_count;
 	fclose(fp);
@@ -188,8 +191,8 @@ int rkimage_extract(const struct rkimage * image, const struct rkimage_item * it
 	int ok = 0;
 	if(!image || !item || !output)
 		return 0;
-	in = fopen(image->path, "rb");
-	out = fopen(output, "wb");
+	in = rk_fopen(image->path, "rb");
+	out = rk_create_file(output);
 	buffer = malloc(1024 * 1024);
 	if(!in || !out || !buffer || rk_fseek(in, (int64_t)item->data_offset, SEEK_SET) != 0)
 		goto cleanup;

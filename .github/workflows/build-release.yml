@@ -74,9 +74,8 @@ jobs:
           install: >-
             base-devel
             make
-            pkgconf
+            mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-libusb
 
       - name: Build
         run: |
@@ -91,13 +90,13 @@ jobs:
           name="openrockcli-windows-x86_64"
           mkdir -p "dist/${name}"
           cp openrockcli.exe README.md LICENSE "dist/${name}/"
-          ldd openrockcli.exe |
-            awk '/ucrt64/ { print $3 }' |
-            sort -u |
-            while read -r dll; do
-              [ -n "${dll}" ] && cp "${dll}" "dist/${name}/"
-            done
-          test -f "dist/${name}/libusb-1.0.dll"
+          mkdir -p "dist/${name}/docs"
+          cp docs/WINDOWS_ROCKUSB.md "dist/${name}/docs/"
+          # Native backend must not regain a libusb/WinUSB runtime dependency.
+          objdump -p openrockcli.exe > dist/windows-imports.txt
+          if grep -Ei 'DLL Name:.*(libusb|winusb|libwinpthread|libgcc)' dist/windows-imports.txt; then
+            exit 1
+          fi
 
       - name: Create zip
         shell: pwsh

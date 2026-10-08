@@ -31,30 +31,6 @@ static struct chip_t chip_unknown = {
 	0x0000, "UNKNOWN"
 };
 
-static int openrockcli_is_adb(libusb_device * device)
-{
-	struct libusb_config_descriptor * config = NULL;
-	int adb = 0;
-	if(libusb_get_active_config_descriptor(device, &config) != 0)
-		return 0;
-	for(int i = 0; i < config->bNumInterfaces && !adb; i++)
-	{
-		const struct libusb_interface * iface = &config->interface[i];
-		for(int j = 0; j < iface->num_altsetting; j++)
-		{
-			const struct libusb_interface_descriptor * desc = &iface->altsetting[j];
-			if(desc->bInterfaceClass == 0xff && desc->bInterfaceSubClass == 0x42 &&
-				desc->bInterfaceProtocol == 0x01)
-			{
-				adb = 1;
-				break;
-			}
-		}
-	}
-	libusb_free_config_descriptor(config);
-	return adb;
-}
-
 const char * openrockcli_chip_name(uint16_t pid)
 {
 	for(int i = 0; i < ARRAY_SIZE(chips); i++)
@@ -65,181 +41,21 @@ const char * openrockcli_chip_name(uint16_t pid)
 	return chip_unknown.name;
 }
 
-int openrockcli_scan(libusb_context * context)
+int openrockcli_init_selected(struct openrockcli_ctx_t *ctx, uint8_t bus, const char *port)
 {
-	libusb_device ** list = NULL;
-	ssize_t count;
-	int found = 0;
-
-	count = libusb_get_device_list(context, &list);
-	if(count < 0)
-		return 0;
-
-	printf("Scanning USB devices...\r\n\r\n");
-	for(ssize_t i = 0; i < count; i++)
-	{
-		struct libusb_device_descriptor desc;
-		libusb_device * device = list[i];
-
-		if(libusb_get_device_descriptor(device, &desc) != 0)
-			continue;
-		if(desc.idVendor != 0x2207)
-			continue;
-		if(openrockcli_is_adb(device))
-			continue;
-
-		if(!found)
-		{
-			printf("Bus  Port  VID:PID    Mode      Chip\r\n");
-			printf("---  ----  ---------  --------  --------\r\n");
-		}
-		uint8_t ports[8] = { 0 };
-		int nports = libusb_get_port_numbers(device, ports, sizeof(ports));
-		printf("%03u  ", libusb_get_bus_number(device));
-		if(nports > 0)
-		{
-			for(int p = 0; p < nports; p++)
-				printf("%s%u", p ? "." : "", ports[p]);
-			printf("%*s", (nports < 4) ? (int)(6 - (nports * 2)) : 2, "");
-		}
-		else
-			printf("-     ");
-
-		printf(" %04x:%04x  %-8s  %s\r\n",
-			desc.idVendor, desc.idProduct,
-			((desc.bcdUSB & 0x0001) == 0x0000) ? "maskrom" : "loader",
-			openrockcli_chip_name(desc.idProduct));
-		found++;
-	}
-	libusb_free_device_list(list, 1);
-
-	if(!found)
-		printf("Error: Device not found\r\n");
-	return found;
+ ctx->last_usb_error = rk_usb_open(ctx, bus, port);
+ if(ctx->last_usb_error) return 0;
+ ctx->chip = &chip_unknown;
+ for(size_t i = 0; i < ARRAY_SIZE(chips); i++)
+  if(chips[i].pid == ctx->pid) { ctx->chip = &chips[i]; break; }
+ return 1;
+}
+int openrockcli_init(struct openrockcli_ctx_t *ctx)
+{
+ return openrockcli_init_selected(ctx, 0, NULL);
 }
 
-static int openrockcli_init_match(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port)
-{
-	libusb_device ** list = NULL;
-	ssize_t count;
-	if(!ctx)
-		return 0;
-
-	ctx->hdl = NULL;
-	ctx->chip = NULL;
-	ctx->last_usb_error = LIBUSB_ERROR_NO_DEVICE;
-	count = libusb_get_device_list(ctx->context, &list);
-	if(count < 0)
-	{
-		ctx->last_usb_error = (int)count;
-		return 0;
-	}
-	for(ssize_t index = 0; index < count; index++)
-	{
-		struct libusb_device_descriptor desc;
-		struct chip_t * chip = &chip_unknown;
-		libusb_device * device = list[index];
-		libusb_device_handle * hdl = NULL;
-		int rc;
-		if(libusb_get_device_descriptor(device, &desc) != 0 || desc.idVendor != 0x2207)
-			continue;
-		if(openrockcli_is_adb(device))
-			continue;
-		if(bus && libusb_get_bus_number(device) != bus)
-			continue;
-		if(port && port[0])
-		{
-			uint8_t ports[8] = { 0 };
-			char actual[32] = { 0 };
-			int nports = libusb_get_port_numbers(device, ports, sizeof(ports));
-			int pos = 0;
-			for(int p = 0; p < nports && pos < (int)sizeof(actual) - 1; p++)
-				pos += snprintf(actual + pos, sizeof(actual) - pos, "%s%u", p ? "." : "", ports[p]);
-			if(strcmp(actual, port))
-				continue;
-		}
-		for(int i = 0; i < ARRAY_SIZE(chips); i++)
-		{
-			if(desc.idProduct == chips[i].pid)
-			{
-				chip = &chips[i];
-				break;
-			}
-		}
-		rc = libusb_open(device, &hdl);
-		if(rc != 0)
-		{
-			ctx->last_usb_error = rc;
-			continue;
-		}
-		ctx->hdl = hdl;
-		ctx->chip = chip;
-#ifndef _WIN32
-		if(libusb_kernel_driver_active(ctx->hdl, 0))
-			libusb_detach_kernel_driver(ctx->hdl, 0);
-#endif
-		rc = libusb_claim_interface(ctx->hdl, 0);
-		if(rc == 0)
-		{
-			struct libusb_config_descriptor * config = NULL;
-			ctx->maskrom = (desc.bcdUSB & 0x0001) == 0x0000;
-			if(ctx->maskrom && desc.iProduct)
-			{
-				unsigned char product[128] = { 0 };
-				if(libusb_get_string_descriptor_ascii(ctx->hdl, desc.iProduct,
-					product, sizeof(product) - 1) > 0 &&
-					(strstr((char *)product, "USB-MSC") || strstr((char *)product, "Loader") ||
-					 strstr((char *)product, "download")))
-					ctx->maskrom = 0;
-			}
-			rc = libusb_get_active_config_descriptor(device, &config);
-			if(rc == 0)
-			{
-				for(int if_idx = 0; if_idx < config->bNumInterfaces; if_idx++)
-				{
-					const struct libusb_interface * iface = config->interface + if_idx;
-					for(int set_idx = 0; set_idx < iface->num_altsetting; set_idx++)
-					{
-						const struct libusb_interface_descriptor * setting = iface->altsetting + set_idx;
-						for(int ep_idx = 0; ep_idx < setting->bNumEndpoints; ep_idx++)
-						{
-							const struct libusb_endpoint_descriptor * ep = setting->endpoint + ep_idx;
-							if((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) != LIBUSB_TRANSFER_TYPE_BULK)
-								continue;
-							if((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
-								ctx->epin = ep->bEndpointAddress;
-							else
-								ctx->epout = ep->bEndpointAddress;
-						}
-					}
-				}
-				libusb_free_config_descriptor(config);
-				ctx->last_usb_error = 0;
-				libusb_free_device_list(list, 1);
-				return 1;
-			}
-			libusb_release_interface(ctx->hdl, 0);
-		}
-		ctx->last_usb_error = rc;
-		libusb_close(ctx->hdl);
-		ctx->hdl = NULL;
-		ctx->chip = NULL;
-	}
-	libusb_free_device_list(list, 1);
-	return 0;
-}
-
-int openrockcli_init(struct openrockcli_ctx_t * ctx)
-{
-	return openrockcli_init_match(ctx, 0, NULL);
-}
-
-int openrockcli_init_selected(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port)
-{
-	return openrockcli_init_match(ctx, bus, port);
-}
-
-void rock_maskrom_upload_memory(struct openrockcli_ctx_t * ctx, uint32_t code, void * buf, uint64_t len, int rc4)
+int rock_maskrom_upload_memory(struct openrockcli_ctx_t * ctx, uint32_t code, void * buf, uint64_t len, int rc4)
 {
 	struct rc4_ctx_t rctx;
 	uint8_t key[16] = { 124, 78, 3, 4, 85, 5, 9, 7, 45, 44, 123, 56, 23, 13, 23, 17 };
@@ -248,6 +64,11 @@ void rock_maskrom_upload_memory(struct openrockcli_ctx_t * ctx, uint32_t code, v
 	int pend = 0;
 	unsigned char * buffer;
 
+	if(len > SIZE_MAX - 5)
+	{
+		ctx->last_usb_error = RK_USB_ERROR_OVERFLOW;
+		return 0;
+	}
 	buffer = malloc(len + 5);
 	if(buffer)
 	{
@@ -277,20 +98,31 @@ void rock_maskrom_upload_memory(struct openrockcli_ctx_t * ctx, uint32_t code, v
 		while(total < len)
 		{
 			int n = ((len - total) > 4096) ? 4096 : (len - total);
-			if(libusb_control_transfer(ctx->hdl, LIBUSB_REQUEST_TYPE_VENDOR, 0xc, 0, code, buffer + total, n, 0) != n)
+			int transferred = rk_usb_control(ctx, code, buffer + total, n);
+			if(transferred != n)
 			{
+				ctx->last_usb_error = transferred < 0 ? transferred : RK_USB_ERROR_IO;
 				free(buffer);
-				return;
+				return 0;
 			}
 			total += n;
 		}
 		if(pend)
 		{
 			unsigned char zero = 0;
-			libusb_control_transfer(ctx->hdl, LIBUSB_REQUEST_TYPE_VENDOR, 0xc, 0, code, &zero, 1, 0);
+			int transferred = rk_usb_control(ctx, code, &zero, 1);
+			if(transferred != 1)
+			{
+				ctx->last_usb_error = transferred < 0 ? transferred : RK_USB_ERROR_IO;
+				free(buffer);
+				return 0;
+			}
 		}
 		free(buffer);
+		return 1;
 	}
+	ctx->last_usb_error = RK_USB_ERROR_NO_MEM;
+	return 0;
 }
 
 void rock_maskrom_upload_file(struct openrockcli_ctx_t * ctx, uint32_t code, const char * filename, int rc4)
@@ -806,41 +638,23 @@ struct usb_response_t {
 	uint8_t status;				/* Response status */
 } __attribute__((packed));
 
-static inline void usb_bulk_send(libusb_device_handle * hdl, int ep, void * buf, size_t len)
+static int usb_bulk_send(struct openrockcli_ctx_t *ctx, void *buf, size_t len)
 {
-	size_t max_chunk = 128 * 1024;
-	size_t chunk;
-	int r, bytes;
-
-	while(len > 0)
-	{
-		chunk = len < max_chunk ? len : max_chunk;
-		r = libusb_bulk_transfer(hdl, ep, (void *)buf, chunk, &bytes, 2000);
-		if(r != 0)
-		{
-			printf("usb bulk send error\r\n");
-			exit(-1);
-		}
-		len -= bytes;
-		buf += bytes;
-	}
+ return rk_usb_transfer_all(ctx, 0, buf, len);
+}
+static int usb_bulk_recv(struct openrockcli_ctx_t *ctx, void *buf, size_t len)
+{
+ return rk_usb_transfer_all(ctx, 1, buf, len);
 }
 
-static inline void usb_bulk_recv(libusb_device_handle * hdl, int ep, void * buf, size_t len)
+static int usb_response_valid(struct openrockcli_ctx_t *ctx, const struct usb_request_t *req,
+ const struct usb_response_t *res)
 {
-	int r, bytes;
-
-	while(len > 0)
-	{
-		r = libusb_bulk_transfer(hdl, ep, (void *)buf, len, &bytes, 2000);
-		if(r != 0)
-		{
-			printf("usb bulk recv error\r\n");
-			exit(-1);
-		}
-		len -= bytes;
-		buf += bytes;
-	}
+ if(get_unaligned_be32(res->signature) == USB_RESPONSE_SIGN && !memcmp(res->tag, req->tag, 4) && !res->status) return 1;
+ ctx->last_usb_error = RK_USB_ERROR_IO;
+ fprintf(stderr, "ROCKCHIP_COMMAND_FAILED: opcode=0x%02x status=%u signature=0x%08x tag_match=%d\n",
+  req->cmd.opcode, res->status, get_unaligned_be32(res->signature), !memcmp(res->tag, req->tag, 4));
+ return 0;
 }
 
 static inline uint32_t make_tag(void)
@@ -867,10 +681,9 @@ int rock_ready(struct openrockcli_ctx_t * ctx)
 	req.cmd.opcode = OPCODE_TEST_UNIT_READY;
 	req.cmd.subcode = 0;
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -888,11 +701,10 @@ int rock_version(struct openrockcli_ctx_t * ctx, uint8_t * buf)
 	req.cmdlen = 6;
 	req.cmd.opcode = OPCODE_READ_CHIP_INFO;
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, buf, 16);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, buf, 16)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -909,11 +721,10 @@ int rock_capability(struct openrockcli_ctx_t * ctx, uint8_t * buf)
 	req.flag = USB_DIRECTION_IN;
 	req.cmdlen = 6;
 	req.cmd.opcode = OPCODE_READ_CAPABILITY;
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, buf, 8);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, buf, 8)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -959,7 +770,7 @@ int rock_capability_support(struct openrockcli_ctx_t * ctx, enum capability_type
 	return 0;
 }
 
-int rock_reset(struct openrockcli_ctx_t * ctx, int maskrom)
+static int rock_reset_mode(struct openrockcli_ctx_t * ctx, uint8_t mode)
 {
 	struct usb_request_t req;
 	struct usb_response_t res;
@@ -971,14 +782,23 @@ int rock_reset(struct openrockcli_ctx_t * ctx, int maskrom)
 	req.flag = USB_DIRECTION_OUT;
 	req.cmdlen = 6;
 	req.cmd.opcode = OPCODE_RESET_DEVICE;
-	req.cmd.subcode = maskrom ? 0x03 : 0x00;
+	req.cmd.subcode = mode;
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
+}
+
+int rock_reset(struct openrockcli_ctx_t *ctx, int maskrom)
+{
+ return rock_reset_mode(ctx, maskrom ? 0x03 : 0x00);
+}
+int rock_poweroff(struct openrockcli_ctx_t *ctx)
+{
+ /* Rockchip RST_POWEROFF_SUBCODE, not a silent no-reset fallback. */
+ return rock_reset_mode(ctx, 0x02);
 }
 
 int rock_exec(struct openrockcli_ctx_t * ctx, uint32_t addr, uint32_t dtb)
@@ -997,10 +817,9 @@ int rock_exec(struct openrockcli_ctx_t * ctx, uint32_t addr, uint32_t dtb)
 	put_unaligned_be32(&req.cmd.address[0], (uint32_t)addr);
 	put_unaligned_be32(&req.cmd.size[0], (uint32_t)dtb);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -1020,11 +839,10 @@ static inline int rock_read_raw(struct openrockcli_ctx_t * ctx, uint32_t addr, v
 	put_unaligned_be32(&req.cmd.address[0], addr);
 	put_unaligned_be16(&req.cmd.size[0], (uint16_t)len);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, buf, len);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, buf, len)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -1044,9 +862,9 @@ static inline int rock_write_raw(struct openrockcli_ctx_t * ctx, uint32_t addr, 
 	put_unaligned_be32(&req.cmd.address[0], addr);
 	put_unaligned_be16(&req.cmd.size[0], (uint16_t)len);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_send(ctx->hdl, ctx->epout, buf, len);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_send(ctx, buf, len)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
 	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) || (memcmp(&res.tag[0], &req.tag[0], 4) != 0))
 		return 0;
 	return 1;
@@ -1136,9 +954,9 @@ int rock_otp_read(struct openrockcli_ctx_t * ctx, uint8_t * buf, int len)
 	req.flag = USB_DIRECTION_IN;
 	req.cmdlen = 6;
 	req.cmd.opcode = OPCODE_READ_OTP_CHIP;
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, buf, len);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, buf, len)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
 	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) || (memcmp(&res.tag[0], &req.tag[0], 4) != 0))
 		return 0;
 	return 1;
@@ -1199,9 +1017,9 @@ int rock_vs_read(struct openrockcli_ctx_t * ctx, int type, int index, uint8_t * 
 	put_unaligned_be16(&req.cmd.address[2], type);
 	put_unaligned_be16(&req.cmd.size[0], len);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, buf, len);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, buf, len)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
 	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) || (memcmp(&res.tag[0], &req.tag[0], 4) != 0))
 		return 0;
 	return 1;
@@ -1224,9 +1042,9 @@ int rock_vs_write(struct openrockcli_ctx_t * ctx, int type, int index, uint8_t *
 	put_unaligned_be16(&req.cmd.address[2], type);
 	put_unaligned_be16(&req.cmd.size[0], len);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_send(ctx->hdl, ctx->epout, buf, len);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_send(ctx, buf, len)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
 	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) || (memcmp(&res.tag[0], &req.tag[0], 4) != 0))
 		return 0;
 	return 1;
@@ -1246,10 +1064,10 @@ enum storage_type_t rock_storage_read(struct openrockcli_ctx_t * ctx)
 	req.cmdlen = 6;
 	req.cmd.opcode = OPCODE_READ_STORAGE;
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, buf, 4);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) || (memcmp(&res.tag[0], &req.tag[0], 4) != 0))
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, buf, 4)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return STORAGE_TYPE_UNKNOWN;
 	enum storage_type_t type = (enum storage_type_t)get_unaligned_le32(buf);
 	switch(type)
@@ -1320,10 +1138,9 @@ int rock_storage_switch(struct openrockcli_ctx_t * ctx, enum storage_type_t type
 		break;
 	}
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -1332,6 +1149,8 @@ int rock_flash_detect(struct openrockcli_ctx_t * ctx, struct flash_info_t * info
 {
 	struct usb_request_t req;
 	struct usb_response_t res;
+	uint8_t raw[512];
+	int received = 0, rc;
 
 	memset(&req, 0, sizeof(struct usb_request_t));
 	put_unaligned_be32(&req.signature[0], USB_REQUEST_SIGN);
@@ -1340,11 +1159,20 @@ int rock_flash_detect(struct openrockcli_ctx_t * ctx, struct flash_info_t * info
 	req.flag = USB_DIRECTION_IN;
 	req.cmdlen = 6;
 	req.cmd.opcode = OPCODE_READ_FLASH_INFO;
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, info, 11);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	/* Vendor READ_FLASH_INFO can return 11..512 bytes in one data stage.
+	 * Do not read-exact 512: that would consume the following CSW. */
+	rc = rk_usb_bulk(ctx, 1, raw, sizeof(raw), &received);
+	if(rc || received < 11 || received > (int)sizeof(raw))
+	{
+		ctx->last_usb_error = rc ? rc : RK_USB_ERROR_IO;
+		fprintf(stderr, "ROCKCHIP_FLASH_INFO_FAILED: received=%d error=%s\n", received, rk_usb_error_name(ctx->last_usb_error));
+		return 0;
+	}
+	memset(info, 0, sizeof(*info));
+	memcpy(info, raw, 11);
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	memset(&req, 0, sizeof(struct usb_request_t));
 	put_unaligned_be32(&req.signature[0], USB_REQUEST_SIGN);
@@ -1353,11 +1181,10 @@ int rock_flash_detect(struct openrockcli_ctx_t * ctx, struct flash_info_t * info
 	req.flag = USB_DIRECTION_IN;
 	req.cmdlen = 6;
 	req.cmd.opcode = OPCODE_READ_FLASH_ID;
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, &info->id[0], 5);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, &info->id[0], 5)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -1377,10 +1204,9 @@ static inline int rock_flash_erase_lba_raw(struct openrockcli_ctx_t * ctx, uint3
 	put_unaligned_be32(&req.cmd.address[0], sec);
 	put_unaligned_be16(&req.cmd.size[0], (uint16_t)cnt);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
@@ -1401,16 +1227,15 @@ static inline int rock_flash_read_lba_raw(struct openrockcli_ctx_t * ctx, uint32
 	put_unaligned_be32(&req.cmd.address[0], sec);
 	put_unaligned_be16(&req.cmd.size[0], (uint16_t)cnt);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_recv(ctx->hdl, ctx->epin, buf, cnt << 9);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_recv(ctx, buf, cnt << 9)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
 	return 1;
 }
 
-static inline int rock_flash_write_lba_raw(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt, void * buf)
+static int rock_flash_write_lba_command(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt, void * buf, uint32_t parity)
 {
 	struct usb_request_t req;
 	struct usb_response_t res;
@@ -1420,18 +1245,73 @@ static inline int rock_flash_write_lba_raw(struct openrockcli_ctx_t * ctx, uint3
 	put_unaligned_be32(&req.tag[0], make_tag());
 	put_unaligned_le32(&req.length[0], cnt << 9);
 	req.flag = USB_DIRECTION_OUT;
-	req.cmdlen = 10;
+	/* Include all checksum bytes; clear them even for an unchecked write.
+	 * Some Loaders retain CDB bytes beyond cmdlen from the preceding command. */
+	req.cmdlen = 16;
 	req.cmd.opcode = OPCODE_WRITE_LBA;
 	req.cmd.subcode = 0;
 	put_unaligned_be32(&req.cmd.address[0], sec);
 	put_unaligned_be16(&req.cmd.size[0], (uint16_t)cnt);
+	put_unaligned_le32((uint8_t *)&req.cmd + 9, parity);
 
-	usb_bulk_send(ctx->hdl, ctx->epout, &req, sizeof(struct usb_request_t));
-	usb_bulk_send(ctx->hdl, ctx->epout, buf, cnt << 9);
-	usb_bulk_recv(ctx->hdl, ctx->epin, &res, sizeof(struct usb_response_t));
-	if((get_unaligned_be32(&res.signature[0]) != USB_RESPONSE_SIGN) ||
-		(memcmp(&res.tag[0], &req.tag[0], 4) != 0) || res.status != 0)
+	if(!usb_bulk_send(ctx, &req, sizeof(struct usb_request_t))) return 0;
+	if(!usb_bulk_send(ctx, buf, cnt << 9)) return 0;
+	if(!usb_bulk_recv(ctx, &res, sizeof(struct usb_response_t))) return 0;
+	if(!usb_response_valid(ctx, &req, &res))
 		return 0;
+	if(parity && get_unaligned_le32(res.residue))
+	{
+		ctx->last_usb_error = RK_USB_ERROR_IO;
+		fprintf(stderr, "ROCKCHIP_VERIFY_FAILED device-checksum incomplete write lba=0x%x residue=%u\n",
+			sec, get_unaligned_le32(res.residue));
+		return 0;
+	}
+	return 1;
+}
+
+static inline int rock_flash_write_lba_raw(struct openrockcli_ctx_t *ctx, uint32_t sec, uint32_t cnt, void *buf)
+{
+	return rock_flash_write_lba_command(ctx, sec, cnt, buf, 0);
+}
+
+static uint32_t rock_lba_parity(const uint8_t *buf, uint32_t sectors)
+{
+	uint32_t sum = 0x55aa;
+	for(size_t i = 0; i < (size_t)sectors * 512; i += 4)
+		sum += get_unaligned_le32(buf + i);
+	return sum;
+}
+
+int rock_flash_write_lba_parity(struct openrockcli_ctx_t *ctx, uint32_t sec, uint32_t cnt, void *buf)
+{
+	uint8_t *data = buf;
+	if(!ctx || !buf || !cnt || (uint64_t)sec + cnt > (uint64_t)UINT32_MAX + 1)
+	{
+		if(ctx) ctx->last_usb_error = RK_USB_ERROR_INVALID_PARAM;
+		return 0;
+	}
+	/* Zero disables the vendor's check. Validate every chunk BEFORE sending
+	 * anything from this request; never turn a zero checksum into unchecked IO. */
+	for(uint32_t offset = 0; offset < cnt;)
+	{
+		uint32_t n = cnt - offset > 128 ? 128 : cnt - offset;
+		if(!rock_lba_parity(data + (size_t)offset * 512, n))
+		{
+			ctx->last_usb_error = RK_USB_ERROR_NOT_SUPPORTED;
+			fprintf(stderr, "ROCKCHIP_VERIFY_UNAVAILABLE device-checksum zero-sentinel lba=0x%x; no write issued for this request\n", sec + offset);
+			return 0;
+		}
+		offset += n;
+	}
+	while(cnt)
+	{
+		uint32_t n = cnt > 128 ? 128 : cnt;
+		uint32_t parity = rock_lba_parity(data, n);
+		if(!rock_flash_write_lba_command(ctx, sec, n, data, parity)) return 0;
+		sec += n;
+		cnt -= n;
+		data += n * 512;
+	}
 	return 1;
 }
 
@@ -1557,7 +1437,7 @@ int rock_flash_read_lba_to_file_progress(struct openrockcli_ctx_t * ctx, uint32_
 {
 	int MAXSEC = 16384;
 
-	FILE * f = fopen(filename, "wb");
+	FILE * f = rk_fopen(filename, "wb");
 	if(!f)
 		return 0;
 
@@ -1608,7 +1488,7 @@ int rock_flash_write_lba_from_file_progress(struct openrockcli_ctx_t * ctx, uint
 {
 	int MAXSEC = 16384;
 
-	FILE * f = fopen(filename, "rb");
+	FILE * f = rk_fopen(filename, "rb");
 	if(!f)
 		return 0;
 

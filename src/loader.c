@@ -246,9 +246,9 @@ char * loader_wide2str(char * str, uint8_t * wide, int len)
 {
 	int i;
 
-	for(i = 0; i < len; i++)
+	for(i = 0; i < len / 2; i++)
 	{
-		char c = wide[i * 2 + 0] & 0xff;
+		unsigned char c = wide[i * 2];
 		str[i] = (c && isprint(c)) ? c : '\0';
 	}
 	str[i] = '\0';
@@ -309,34 +309,47 @@ static struct rkloader_ctx_t * rkloader_ctx_parse(void * buffer, uint64_t length
 		return NULL;
 	}
 
-	for(int i = 0; i < ctx->nentry; i++)
-	{
-		ctx->entry[i] = (struct rkloader_entry_t *)(ctx->buffer + sizeof(struct rkloader_header_t) + sizeof(struct rkloader_entry_t) * i);
+	/* Validate all tables/payloads before dereferencing entries or building IDB. */
+	if(ctx->nentry > (int)ARRAY_SIZE(ctx->entry) || ctx->length < sizeof(*ctx->header) + 4)
+		goto invalid;
+	uint32_t offsets[3] = {le32_to_cpu(ctx->header->code471_offset), le32_to_cpu(ctx->header->code472_offset), le32_to_cpu(ctx->header->loader_offset)};
+	unsigned counts[3] = {ctx->header->code471_num, ctx->header->code472_num, ctx->header->loader_num};
+	unsigned strides[3] = {ctx->header->code471_size, ctx->header->code472_size, ctx->header->loader_size};
+	uint64_t payload_end = ctx->length - 4, table_end = sizeof(*ctx->header), idb_size = 0;
+	int n = 0, flash_data = 0, flash_boot = 0;
+	for(int group = 0; group < 3; group++) {
+		if(!counts[group]) continue;
+		uint64_t end = (uint64_t)offsets[group] + (uint64_t)counts[group] * strides[group];
+		if(strides[group] < sizeof(struct rkloader_entry_t) || offsets[group] < sizeof(*ctx->header) || end > payload_end)
+			goto invalid;
+		if(end > table_end) table_end = end;
+		for(unsigned j = 0; j < counts[group]; j++) {
+			struct rkloader_entry_t *e = (void *)((uint8_t *)ctx->buffer + offsets[group] + j * strides[group]);
+			if(e->size < sizeof(*e) || e->size > strides[group] || get_unaligned_le32(&e->type) != (1U << group)) goto invalid;
+			ctx->entry[n++] = e;
+		}
 	}
-
-	struct rkloader_entry_t * e = ctx->entry[ctx->nentry - 1];
-	uint32_t len = get_unaligned_le32(&e->data_offset) + get_unaligned_le32(&e->data_size);
-	if(ctx->length != len + 4)
-	{
-		if(ctx->buffer)
-			free(ctx->buffer);
-		if(ctx)
-			free(ctx);
-		return NULL;
+	for(int i = 0; i < ctx->nentry; i++) {
+		struct rkloader_entry_t *e = ctx->entry[i];
+		uint64_t offset = get_unaligned_le32(&e->data_offset), size = get_unaligned_le32(&e->data_size);
+		if(!size || offset < table_end || offset > payload_end || size > payload_end - offset || size > UINT32_MAX - 2047U) goto invalid;
+		if(e->type == RKLOADER_ENTRY_LOADER) {
+			char name[41]; loader_wide2str(name, (uint8_t *)e->name, sizeof(e->name));
+			idb_size += (size + 2047U) & ~UINT64_C(2047);
+			if(!strcmp(name, "FlashData")) flash_data++;
+			if(!strcmp(name, "FlashBoot")) flash_boot++;
+		}
 	}
-
-	uint32_t crc32 = 0x0;
-	if(crc32_sum(crc32, (const uint8_t *)ctx->buffer, len) != get_unaligned_le32((char *)ctx->buffer + len))
-	{
-		if(ctx->buffer)
-			free(ctx->buffer);
-		if(ctx)
-			free(ctx);
-		return NULL;
-	}
+	if(idb_size > UINT32_MAX - 2048U || idb_size + 2048U > SIZE_MAX) goto invalid;
+	if(!ctx->is_newidb && counts[2] && (flash_data != 1 || flash_boot != 1 || idb_size / 512 > UINT16_MAX)) goto invalid;
+	if(crc32_sum(0, ctx->buffer, payload_end) != get_unaligned_le32((uint8_t *)ctx->buffer + payload_end)) goto invalid;
 
 	rkloader_ctx_mkidb(ctx);
+	if(ctx->idblen && !ctx->idbbuf) goto invalid;
 	return ctx;
+invalid:
+	rkloader_ctx_free(ctx);
+	return NULL;
 }
 
 struct rkloader_ctx_t * rkloader_ctx_alloc(const char * filename)

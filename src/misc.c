@@ -8,7 +8,7 @@ uint64_t file_save(const char * filename, void * buf, uint64_t len)
 	if(strcmp(filename, "-") == 0)
 		out = stdout;
 	else
-		out = fopen(filename, "wb");
+		out = rk_fopen(filename, "wb");
 	if(!out)
 	{
 		perror("Failed to open output file");
@@ -28,7 +28,7 @@ void * file_load(const char * filename, uint64_t * len)
 	if(strcmp(filename, "-") == 0)
 		in = stdin;
 	else
-		in = fopen(filename, "rb");
+		in = rk_fopen(filename, "rb");
 	if(!in)
 	{
 		perror("Failed to open input file");

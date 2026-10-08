@@ -14,7 +14,10 @@ extern "C" {
 #include <ctype.h>
 #include <assert.h>
 #include <unistd.h>
-#include <libusb.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#include <file_portable.h>
 
 /*
  * byteorder
@@ -157,12 +160,12 @@ static inline uint16_t __get_unaligned_be16(const uint8_t * p)
 
 static inline uint32_t __get_unaligned_le32(const uint8_t * p)
 {
-	return (p[0] << 0) | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static inline uint32_t __get_unaligned_be32(const uint8_t * p)
 {
-	return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | (p[3] << 0);
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
 static inline uint64_t __get_unaligned_le64(const uint8_t * p)

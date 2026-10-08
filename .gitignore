@@ -15,3 +15,5 @@
 /.settings
 /openrockcli
 /openrockcli.exe
+
+/.build/

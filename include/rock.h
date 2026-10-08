@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include <x.h>
+#include <usb_transport.h>
 #include <rc4.h>
 #include <crc16.h>
 #include <crc32.h>
@@ -49,12 +50,10 @@ struct chip_t {
 };
 
 struct openrockcli_ctx_t {
-	libusb_context * context;
-	libusb_device_handle * hdl;
+	struct rk_usb_handle *usb;
+	uint16_t pid;
 	struct chip_t * chip;
 	int last_usb_error;
-	int epout;
-	int epin;
 	int maskrom;
 };
 
@@ -70,10 +69,9 @@ struct flash_info_t {
 };
 
 const char * openrockcli_chip_name(uint16_t pid);
-int openrockcli_scan(libusb_context * context);
 int openrockcli_init(struct openrockcli_ctx_t * ctx);
 int openrockcli_init_selected(struct openrockcli_ctx_t * ctx, uint8_t bus, const char * port);
-void rock_maskrom_upload_memory(struct openrockcli_ctx_t * ctx, uint32_t code, void * buf, uint64_t len, int rc4);
+int rock_maskrom_upload_memory(struct openrockcli_ctx_t * ctx, uint32_t code, void * buf, uint64_t len, int rc4);
 void rock_maskrom_upload_file(struct openrockcli_ctx_t * ctx, uint32_t code, const char * filename, int rc4);
 void rock_maskrom_dump_arm32(struct openrockcli_ctx_t * ctx, uint32_t uart, uint32_t addr, uint32_t len, int rc4);
 void rock_maskrom_dump_arm64(struct openrockcli_ctx_t * ctx, uint32_t uart, uint32_t addr, uint32_t len, int rc4);
@@ -86,6 +84,7 @@ int rock_version(struct openrockcli_ctx_t * ctx, uint8_t * buf);
 int rock_capability(struct openrockcli_ctx_t * ctx, uint8_t * buf);
 int rock_capability_support(struct openrockcli_ctx_t * ctx, enum capability_type_t type);
 int rock_reset(struct openrockcli_ctx_t * ctx, int maskrom);
+int rock_poweroff(struct openrockcli_ctx_t * ctx);
 int rock_exec(struct openrockcli_ctx_t * ctx, uint32_t addr, uint32_t dtb);
 int rock_read(struct openrockcli_ctx_t * ctx, uint32_t addr, void * buf, size_t len);
 int rock_write(struct openrockcli_ctx_t * ctx, uint32_t addr, void * buf, size_t len);
@@ -102,6 +101,8 @@ int rock_flash_detect(struct openrockcli_ctx_t * ctx, struct flash_info_t * info
 int rock_flash_erase_lba(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt);
 int rock_flash_read_lba(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt, void * buf);
 int rock_flash_write_lba(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt, void * buf);
+/* Caller must first confirm CAPABILITY_TYPE_LBA_PARITY on this Loader. */
+int rock_flash_write_lba_parity(struct openrockcli_ctx_t *ctx, uint32_t sec, uint32_t cnt, void *buf);
 int rock_flash_erase_lba_progress(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt);
 int rock_flash_read_lba_progress(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt, void * buf);
 int rock_flash_write_lba_progress(struct openrockcli_ctx_t * ctx, uint32_t sec, uint32_t cnt, void * buf);
