@@ -736,6 +736,7 @@ static int backend_flash_raw(const struct rockchip_flash_request *r,
   backend_report(cb,user,"Downloading external RAM Loader; no IDB/boot partition writes");
   if(!backend_download_loader(&ctx,&loader_image,&loader,devices[selected].bus,devices[selected].port,cb,user))goto end;
  } else backend_report(cb,user,"Already in Loader mode: external RAM Loader download skipped.");
+ backend_emit(cb,user,ROCKCHIP_BACKEND_EVENT_STAGE,"Checking Raw eMMC",-1);
  if(rock_storage_read(&ctx)!=STORAGE_TYPE_EMMC || ctx.last_usb_error) {
   backend_report(cb,user,"Error: ROCKCHIP_RAW_STORAGE: current medium is not confirmed eMMC; no erase or write issued");goto end;
  }
