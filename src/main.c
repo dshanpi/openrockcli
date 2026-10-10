@@ -36,10 +36,15 @@ static int modern_flash(int argc, char * argv[])
 	const char * port = NULL;
 	int verify = 1;
 	int verbose = 0;
+	int raw = 0;
+	const char *loader = NULL, *storage = NULL;
 
 	for(int i = 2; i < argc; i++)
 	{
-		if((!strcmp(argv[i], "-a") || !strcmp(argv[i], "--post-action")) && (i + 1 < argc))
+		if(!strcmp(argv[i], "--raw")) raw = 1;
+		else if(!strcmp(argv[i], "--loader") && i+1<argc) loader=argv[++i];
+		else if(!strcmp(argv[i], "--storage") && i+1<argc) storage=argv[++i];
+		else if((!strcmp(argv[i], "-a") || !strcmp(argv[i], "--post-action")) && (i + 1 < argc))
 			post_action = argv[++i];
 		else if(!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose"))
 			verbose = 1;
@@ -105,6 +110,7 @@ static int modern_flash(int argc, char * argv[])
 	request.port = port;
 	request.verify = verify;
 	request.verbose = verbose;
+	request.raw = raw;request.loader=loader;request.storage=storage;
 	return rockchip_backend_flash(&request);
 }
 
@@ -1078,6 +1084,7 @@ static void command_help(const char * command)
 		printf("  -b, --bus <BUS>                  USB bus number\r\n");
 		printf("  -P, --port <PORT>                USB port number\r\n");
 		printf("  -V, --verify <VERIFY>            Enable verification after write [default: true] [possible values: true, false]\r\n");
+		printf("      --raw --loader <LOADER> --storage emmc  Full raw eMMC image (requires verification and full_erase)\r\n");
 		printf("      --no-verify                  Disable verification preference\r\n");
 		printf("      --noreset                    Leave the device in Loader mode after flashing\r\n");
 		printf("  -m, --mode <MODE>                Flash mode: partition, keep_data, partition_erase, full_erase [default: full_erase]\r\n");
@@ -1142,7 +1149,7 @@ int openrockcli_main(int argc, char * argv[])
 	}
 	if(!strcmp(argv[1], "-V") || !strcmp(argv[1], "--version"))
 	{
-		printf("openrockcli 1.2.1\r\n");
+		printf("openrockcli 1.3.0\r\n");
 		return 0;
 	}
 	if(!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))
@@ -1199,7 +1206,11 @@ int openrockcli_main(int argc, char * argv[])
 		}
 		return rockchip_backend_list_devices() > 0 ? 0 : 1;
 	}
-	if(!strcmp(argv[1], "inspect") || !strcmp(argv[1], "info"))
+	if(!strcmp(argv[1], "inspect-raw")) {
+        if(argc!=5 || strcmp(argv[3],"--loader")) {printf("Usage: openrockcli inspect-raw <IMAGE> --loader <LOADER>\n");return 1;}
+        return rockchip_inspect_raw(argv[2],argv[4])?0:1;
+    }
+    if(!strcmp(argv[1], "inspect") || !strcmp(argv[1], "info"))
 	{
 		if(argc >= 3 && (!strcmp(argv[2], "-h") || !strcmp(argv[2], "--help")))
 		{

@@ -42,6 +42,10 @@ struct rockchip_firmware_info {
 	struct rockchip_firmware_entry entries[ROCKCHIP_BACKEND_MAX_FW_ENTRIES];
 };
 
+struct rkimage;
+int rockchip_raw_image(const char *path, struct rkimage *image);
+int rockchip_inspect_raw(const char *path, const char *loader);
+
 struct rockchip_flash_request {
 	const char * firmware;
 	const char * mode;
@@ -51,6 +55,9 @@ struct rockchip_flash_request {
 	const char * port;
 	int verify;
 	int verbose;
+	int raw;
+	const char *loader;
+	const char *storage;
 };
 
 enum rockchip_backend_event_type {

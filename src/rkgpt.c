@@ -23,7 +23,7 @@ static void rkgpt_error(char * error, size_t size, const char * format, ...)
 	va_end(ap);
 }
 
-static uint32_t rkgpt_crc32(const uint8_t * data, size_t size)
+uint32_t rkgpt_crc32(const uint8_t * data, size_t size)
 {
 	uint32_t crc = 0xffffffffU;
 	while(size--)

@@ -622,3 +622,23 @@ The workflow uploads:
 ## License
 
 This library is free software; you can redistribute it and or modify it under the terms of the MIT license. See [MIT License](LICENSE) for details.
+
+## Complete raw eMMC images (1.3.0)
+
+`openrockcli inspect-raw disk.img --loader loader.bin` validates an aligned whole-disk
+MBR/GPT image and a RAM Loader without scanning or opening USB. Extended MBR
+partition chains, sparse Android images, update.img containers and compressed files
+are not raw disks. Both GPT copies and entry CRCs must be valid; partitions must be
+in bounds and not overlap. Images above 4 GiB use 64-bit file offsets.
+
+`openrockcli flash disk.img --raw --loader loader.bin --storage emmc --mode full_erase --verify true --bus BUS --port PORT`
+
+This native transaction downloads the external Loader only in Maskrom, reconnects
+at the same USB location, requires current storage to be eMMC, checks capacity and
+verification capabilities before erasing the user area, and writes from LBA 0 with
+per-block verification. An already-running Loader is reused. External Loader bytes
+are never written as IDB; Boot0/Boot1, GPT relocation and partition expansion are
+not performed. The disk must already contain board-matched boot components.
+Verification is mandatory; failures never retry, downgrade verification or reboot.
+Post action defaults to reboot; `--post-action none` leaves Loader running.
+LYNX handles gzip/xz decompression, immutable task snapshots and file hashes.

@@ -301,7 +301,7 @@ static int backend_download_loader(struct openrockcli_ctx_t * ctx, const struct 
 	if(!downloaded)
 		return 0;
 	backend_destroy_device(ctx);
-	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "Reconnecting", -1);
+	backend_emit(cb, user, ROCKCHIP_BACKEND_EVENT_STAGE, "RK Loader Reconnecting", -1);
 	for(int attempt = 0; attempt < 60; attempt++)
 	{
 		backend_sleep_ms(250);
@@ -706,6 +706,75 @@ static void backend_cli_event(const struct rockchip_backend_event * event, void 
 	fflush(stdout);
 }
 
+/* A single native transaction; the external Loader is never a flash artifact. */
+static int backend_flash_raw(const struct rockchip_flash_request *r,
+ rockchip_backend_event_cb cb, void *user)
+{
+ struct rkimage image, loader_image;
+ struct rkimage_item item={0}, loader={0};
+ struct rockchip_device_info devices[32];struct openrockcli_ctx_t ctx;
+ struct flash_info_t info;struct backend_progress progress={0,0,-1};
+ int count,selected,method,ok=0;uint8_t check[512];
+ const char *action=r->post_action?r->post_action:"reboot";
+ if(!r->verify || !r->storage || strcmp(r->storage,"emmc") || r->partitions ||
+    (r->mode && strcmp(r->mode,"full_erase")) ||
+    (strcmp(action,"reboot") && strcmp(action,"none") && strcmp(action,"poweroff"))) {
+  backend_report(cb,user,"Error: ROCKCHIP_RAW_OPTIONS: raw requires emmc, full_erase and verification");return 0;
+ }
+ if(!rockchip_inspect_raw(r->firmware,r->loader) || !rockchip_raw_image(r->firmware,&image))return 0;
+ memset(&loader_image,0,sizeof(loader_image));
+ if(strlen(r->loader)>=sizeof(loader_image.path) || rk_file_size(r->loader,&loader_image.file_size))return 0;
+ strcpy(loader_image.path,r->loader);loader.size=loader_image.file_size;
+ count=rockchip_backend_scan_devices(devices,ARRAY_SIZE(devices));
+ selected=count<0?count:rk_usb_select(devices,count,r->bus,r->port);
+ if(selected<0){backend_report(cb,user,"Error: raw target selection failed (%s)",rk_usb_error_name(selected));return 0;}
+ backend_emit(cb,user,ROCKCHIP_BACKEND_EVENT_STAGE,"Query Device",-1);
+ if(!backend_open_device(&ctx,devices[selected].bus,devices[selected].port)) {
+  backend_report(cb,user,"Error: %s (%s)",rockchip_usb_open_error_code(ctx.last_usb_error),rk_usb_error_name(ctx.last_usb_error));return 0;
+ }
+ if(ctx.maskrom) {
+  backend_report(cb,user,"Downloading external RAM Loader; no IDB/boot partition writes");
+  if(!backend_download_loader(&ctx,&loader_image,&loader,devices[selected].bus,devices[selected].port,cb,user))goto end;
+ } else backend_report(cb,user,"Already in Loader mode: external RAM Loader download skipped.");
+ if(rock_storage_read(&ctx)!=STORAGE_TYPE_EMMC || ctx.last_usb_error) {
+  backend_report(cb,user,"Error: ROCKCHIP_RAW_STORAGE: current medium is not confirmed eMMC; no erase or write issued");goto end;
+ }
+ if(!rock_flash_detect(&ctx,&info) || !info.sector_total || image.file_size/512>info.sector_total) {
+  backend_report(cb,user,"Error: ROCKCHIP_RAW_CAPACITY: cannot establish sufficient eMMC capacity; no erase or write issued");goto end;
+ }
+ method=backend_select_verification(&ctx,1,cb,user);if(method<0)goto end;
+ if(method==VERIFY_HOST_READBACK) {
+  backend_emit(cb,user,ROCKCHIP_BACKEND_EVENT_STAGE,"Checking Readback",-1);
+  uint32_t probes[]={0,(uint32_t)(image.file_size/512-1)};
+  for(unsigned i=0;i<ARRAY_SIZE(probes);i++) {
+   if(!rock_flash_read_lba(&ctx,probes[i],1,check)) {
+    backend_report(cb,user,"Error: ROCKCHIP_VERIFY_UNAVAILABLE before erase: raw readback probe failed");goto end;
+   }
+   int suspicious=1;for(unsigned j=0;j<sizeof(check);j++)if(check[j]!=0xcc){suspicious=0;break;}
+   if(suspicious){backend_report(cb,user,"Error: ROCKCHIP_VERIFY_UNAVAILABLE before erase: raw all-0xcc response");goto end;}
+  }
+ }
+ backend_report(cb,user,"Target eMMC: %u sectors; raw image: %llu bytes",info.sector_total,(unsigned long long)image.file_size);
+ backend_emit(cb,user,ROCKCHIP_BACKEND_EVENT_STAGE,"Erasing",-1);
+ backend_report(cb,user,"RAW_ERASE_START");
+ if(!rock_flash_erase_lba(&ctx,0,info.sector_total)) {backend_report(cb,user,"Error: raw eMMC erase failed");goto end;}
+ backend_emit(cb,user,ROCKCHIP_BACKEND_EVENT_STAGE,"Flashing Partitions",-1);
+ backend_report(cb,user,"RAW_WRITE_START: LBA 0; verifying each written block");
+ strcpy(item.name,"raw eMMC");item.size=image.file_size;progress.total=image.file_size;
+ if(!backend_write_item(&ctx,&image,&item,0,method,&progress,cb,user)) {
+  backend_report(cb,user,"Error: raw write or verification failed; no retry");goto end;
+ }
+ if(strcmp(action,"none")) {
+  backend_emit(cb,user,ROCKCHIP_BACKEND_EVENT_STAGE,"Setting Mode",100);
+  if(!(!strcmp(action,"reboot")?rock_reset(&ctx,0):rock_poweroff(&ctx))) {
+   backend_report(cb,user,"Error: raw post action was not acknowledged");goto end;
+  }
+ } else backend_report(cb,user,"Reset skipped; leaving the device in Loader mode.");
+ backend_report(cb,user,"Flash complete! Verification: passed. Post action: %s.",action);ok=1;
+end:
+ backend_destroy_device(&ctx);if(!ok)backend_report(cb,user,"Flash failed.");return ok;
+}
+
 int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request,
 	rockchip_backend_event_cb cb, void * user)
 {
@@ -726,6 +795,8 @@ int rockchip_backend_flash_with_cb(const struct rockchip_flash_request * request
 	int verify_active;
 	enum storage_type_t storage;
 	int ok = 0;
+	if(request && request->raw) return backend_flash_raw(request, cb, user);
+	if(request && (request->loader || request->storage)) {backend_report(cb,user,"Error: Loader/storage options require --raw");return 0;}
 	if(!request || !rkimage_open(request->firmware, &image, error, sizeof(error)))
 	{
 		backend_report(cb, user, "Error: %s", error[0] ? error : "firmware file not specified");

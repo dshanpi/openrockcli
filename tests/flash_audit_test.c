@@ -222,6 +222,62 @@ int main(int argc,char **argv) {
   if(v==6)loader[loader_size-1]^=1;
   l=rkloader_ctx_alloc_data(loader,loader_size);CHECK(!l);rkloader_ctx_free(l);
  }
+ /* Raw route uses a complete MBR image and an external RAM-only Loader. */
+ char raw_path[1024], loader_path[1024];
+ snprintf(raw_path,sizeof(raw_path),"%s.raw",r.firmware);
+ snprintf(loader_path,sizeof(loader_path),"%s.loader",r.firmware);
+ unsigned char raw[256*512]; memset(raw,0x5a,sizeof(raw));
+ memset(raw,0,512);raw[510]=0x55;raw[511]=0xaa;raw[450]=0x83;
+ put_unaligned_le32(raw+454,64);put_unaligned_le32(raw+458,192);
+ FILE *rf=rk_fopen(raw_path,"wb");CHECK(rf);CHECK(fwrite(raw,1,sizeof(raw),rf)==sizeof(raw));fclose(rf);
+ make_loader();rf=rk_fopen(loader_path,"wb");CHECK(rf);CHECK(fwrite(loader,1,loader_size,rf)==loader_size);fclose(rf);
+ struct rockchip_flash_request rr={0};rr.firmware=raw_path;rr.raw=1;rr.loader=loader_path;
+ rr.storage="emmc";rr.mode="full_erase";rr.verify=1;rr.post_action="reboot";
+ rr.bus=r.bus;rr.port=r.port;
+ for(int m=0;m<2;m++) {
+  clear_counts();start_maskrom=m;CHECK(rockchip_backend_flash_with_cb(&rr,event,NULL));
+  CHECK(erases && writes && resets==1 && !memcmp(disk,raw,sizeof(raw)));
+  CHECK(controls==(m?2:0));CHECK(disk[sizeof(raw)]==0xff);
+ }
+ for(int m=0;m<3;m++) {
+  clear_counts();storage=m==0?STORAGE_TYPE_SD:m==1?STORAGE_TYPE_SPINAND:STORAGE_TYPE_UNKNOWN;
+  CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!erases && !writes && !resets);
+ }
+ clear_counts();disk_sectors=128;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!erases && !writes);
+ clear_counts();capabilities=0;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!erases && !writes);
+ clear_counts();capabilities=0x405;CHECK(rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(parity_writes==writes && writes && resets==1);
+ clear_counts();capabilities=0x405;bad_parity_lba=128;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(writes && !resets);
+ clear_counts();corrupt_lba=128;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(writes && !resets && !parity_writes);
+ clear_counts();rr.verify=0;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!opens && !erases && !writes);rr.verify=1;
+ clear_counts();rr.loader="missing-loader";CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!opens && !erases && !writes);rr.loader=loader_path;
+ clear_counts();rr.port="other-port";CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!opens && !writes && !erases);rr.port=r.port;
+ clear_counts();reset_failure=1;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(resets==1 && writes);
+ clear_counts();start_maskrom=1;delayed_maskrom=100;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(controls==2 && !writes && !erases && !resets);
+ for(int step=1;step<=20;step+=6){clear_counts();fail_at=step;CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(bulk_calls==(unsigned)step && !resets);}
+ /* 64-bit sparse input validates without allocating or writing four GiB. */
+ rf=rk_fopen(raw_path,"wb");CHECK(fwrite(raw,1,512,rf)==512);
+ #ifdef _WIN32
+ CHECK(!_fseeki64(rf,((int64_t)1<<32)+511,SEEK_SET));
+ #else
+ CHECK(!fseeko(rf,((int64_t)1<<32)+511,SEEK_SET));
+ #endif
+ CHECK(fputc(0,rf)!=EOF);fclose(rf);
+ struct rkimage large_image;CHECK(rockchip_raw_image(raw_path,&large_image));CHECK(large_image.file_size==((uint64_t)1<<32)+512);
+ /* Preserve both GPT copies byte-for-byte; GPT uses EFI CRC, not Loader CRC. */
+ unsigned char master[RKGPT_MASTER_SECTORS*512],backup[RKGPT_BACKUP_SECTORS*512];char gpt_error[128];
+ const char *parameter="CMDLINE: mtdparts=rk29xxnand:0x64@0x40(rootfs)\n";
+ CHECK(rkgpt_build(parameter,strlen(parameter),256,master,backup,gpt_error,sizeof(gpt_error)));
+ memcpy(raw,master,sizeof(master));memcpy(raw+sizeof(raw)-sizeof(backup),backup,sizeof(backup));
+ rf=rk_fopen(raw_path,"wb");CHECK(fwrite(raw,1,sizeof(raw),rf)==sizeof(raw));fclose(rf);
+ clear_counts();CHECK(rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!memcmp(disk,raw,sizeof(raw)));
+ for(int i=0;i<3;i++) {
+  unsigned offset=i==0?512+16:i==1?1024:sizeof(raw)-512+16;
+  raw[offset]^=1;rf=rk_fopen(raw_path,"wb");CHECK(fwrite(raw,1,sizeof(raw),rf)==sizeof(raw));fclose(rf);
+  clear_counts();CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!opens && !writes && !erases);raw[offset]^=1;
+ }
+ raw[510]=0;rf=rk_fopen(raw_path,"wb");CHECK(fwrite(raw,1,sizeof(raw),rf)==sizeof(raw));fclose(rf);
+ clear_counts();CHECK(!rockchip_backend_flash_with_cb(&rr,event,NULL));CHECK(!opens && !erases && !writes);
+ CHECK(!remove(raw_path));CHECK(!remove(loader_path));
  /* Guarded UTF-16 input: the length is bytes, not UTF-16 code units. */
  unsigned char name[]={ 'A',0,'B',0 };char out[8];memset(out,'X',sizeof(out));loader_wide2str(out,name,sizeof(name));CHECK(!strcmp(out,"AB") && out[3]=='X');
  CHECK(!remove(r.firmware));fprintf(stderr,"audit failures=%d\n",failed);return failed?1:0;
